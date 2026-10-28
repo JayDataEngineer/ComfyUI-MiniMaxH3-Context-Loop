@@ -379,6 +379,201 @@ _PENDING_FINAL_REVIEW_PREVIEWS: dict[
 ] = {}
 _FFMPEG_PROBE_CACHE: dict[str, bool] = {}
 
+# THE RUN-LEVEL CHAIN LOCK (h3-swap-chain-failures fix 3, 2026-10-28):
+# checkpoint_run_lock guards each individual mutation, but two
+# concurrent top-level prompts against ONE run_name interleave scene
+# checkpoints, revisions, and manifests across a whole render — the
+# revision tree absorbed the 2026-10-28 double-press, a lock makes the
+# second press refuse loudly instead. Loop Start acquires before
+# preflight (a refused preflight must not hold the run), Loop End
+# heartbeats once per completed scene and releases at every
+# prompt-terminal return (handoff, alternate publish, both completions;
+# mid-chain recursion keeps the hold). A holder that dies mid-scene
+# (node error, interrupt) cannot release from its own code path — two
+# cures (2026-10-28 retest gap 2): the hold records the holder's
+# prompt_id (captured at acquire, when this prompt is the queue's only
+# running entry), and a contender may take over as soon as that prompt
+# is no longer executing; PromptQueue.task_done is also wrapped once to
+# release every hold at its holder prompt's end, any outcome, so an
+# errored prompt never keeps the run. _CHAIN_RUN_STALE_SECONDS remains
+# the fallback for holds recorded without a resolvable prompt_id.
+_ACTIVE_CHAIN_RUNS: dict[str, dict[str, Any]] = {}
+_ACTIVE_CHAIN_RUNS_GUARD = threading.Lock()
+_CHAIN_RUN_STALE_SECONDS = 900.0
+
+
+def _chain_running_prompt_ids() -> set[str]:
+    """prompt_ids of every currently executing prompt (queue snapshot)."""
+    if PromptServer is None or PromptServer.instance is None:
+        return set()
+    queue = getattr(PromptServer.instance, "prompt_queue", None)
+    if queue is None:
+        return set()
+    try:
+        with queue.mutex:
+            running = list(queue.currently_running.values())
+    except Exception:
+        return set()
+    ids: set[str] = set()
+    for item in running:
+        prompt_id = (item[1] if isinstance(item, tuple) and len(item) > 1
+                     else None)
+        if isinstance(prompt_id, str) and prompt_id:
+            ids.add(prompt_id)
+    return ids
+
+
+def _self_prompt_id() -> str | None:
+    """This prompt's own prompt_id, captured while it is executing.
+
+    The queue executes prompts one at a time, so during this prompt's
+    own Loop Start the single currently_running entry IS this prompt —
+    its id is the honest holder identity for the run lock. Returns None
+    when the queue is unavailable or runs prompts in parallel (future);
+    the lock then falls back to heartbeat-staleness-only takeover.
+    """
+    ids = _chain_running_prompt_ids()
+    if len(ids) == 1:
+        return next(iter(ids))
+    return None
+
+
+def _acquire_chain_run(run_name: Any) -> str:
+    """Take the run-level chain lock for this prompt or refuse loudly.
+
+    @param run_name the plan's strict run_name
+    @returns the normalized run_name (the release/heartbeat key)
+    """
+    normalized = _strict_run_name(run_name)
+    now = time.monotonic()
+    self_prompt_id = _self_prompt_id()
+    with _ACTIVE_CHAIN_RUNS_GUARD:
+        held = _ACTIVE_CHAIN_RUNS.get(normalized)
+        if held is not None:
+            stale_for = now - float(
+                held.get("heartbeat_at", held.get("acquired_at", now)))
+            holder_prompt_id = held.get("holder_prompt_id")
+            refusal = (
+                "H3 chain run_name %r is already executing in another "
+                "prompt (last scene heartbeat %.0fs ago): two "
+                "concurrent runs against one chain dir interleave "
+                "checkpoint revisions. Wait for the running prompt to "
+                "finish, interrupt it, or use a fresh run_name."
+                % (normalized, max(0.0, stale_for)))
+            if holder_prompt_id is not None:
+                if holder_prompt_id in _chain_running_prompt_ids():
+                    # The holder prompt is alive (executing right now):
+                    # refuse regardless of heartbeat age — a live prompt
+                    # owns the chain, long scenes included.
+                    raise ValueError(refusal)
+                _LOG.warning(
+                    "H3 chain run_name %r lock held by prompt %s which is "
+                    "no longer executing (ended without release); taking "
+                    "over.", normalized, holder_prompt_id)
+            elif stale_for < _CHAIN_RUN_STALE_SECONDS:
+                raise ValueError(refusal)
+            else:
+                _LOG.warning(
+                    "H3 chain run_name %r lock stale (%.0fs since last "
+                    "scene heartbeat, holder prompt unknown); taking over.",
+                    normalized, stale_for)
+        _ACTIVE_CHAIN_RUNS[normalized] = {
+            "acquired_at": now, "heartbeat_at": now,
+            "holder_prompt_id": self_prompt_id}
+    _install_chain_run_task_done_release()
+    return normalized
+
+
+def _heartbeat_chain_run(run_name: Any) -> None:
+    """Mark one more completed scene under the run-level chain lock."""
+    normalized = _strict_run_name(run_name)
+    with _ACTIVE_CHAIN_RUNS_GUARD:
+        held = _ACTIVE_CHAIN_RUNS.get(normalized)
+        if held is not None:
+            held["heartbeat_at"] = time.monotonic()
+
+
+def _release_chain_run(run_name: Any) -> None:
+    """Drop the run-level chain lock at a prompt-terminal return."""
+    normalized = _strict_run_name(run_name)
+    with _ACTIVE_CHAIN_RUNS_GUARD:
+        _ACTIVE_CHAIN_RUNS.pop(normalized, None)
+
+
+_TASK_DONE_WRAP_FLAG = "_h3_chain_run_task_done_wrapped"
+
+
+def _release_chain_runs_held_by_prompt(prompt_id: str) -> None:
+    """Drop every run hold whose holder prompt has just ended.
+
+    @param prompt_id the ending prompt's id (PromptQueue item[1])
+    """
+    with _ACTIVE_CHAIN_RUNS_GUARD:
+        for run_name in [name for name, hold in _ACTIVE_CHAIN_RUNS.items()
+                         if hold.get("holder_prompt_id") == prompt_id]:
+            del _ACTIVE_CHAIN_RUNS[run_name]
+            _LOG.info(
+                "H3 chain run_name %r lock released at prompt end "
+                "(holder prompt %s ended without its own release).",
+                run_name, prompt_id)
+
+
+def _install_chain_run_task_done_release() -> None:
+    """Release run holds at their holder prompt's end, any outcome.
+
+    PromptQueue.task_done is the single choke point a prompt passes
+    through on success AND on error/interrupt; Loop End's own release
+    only fires on clean terminal returns, so a node error previously
+    kept the hold until process restart (2026-10-28 retest gap 2,
+    live hit). The wrapper reads the ending item's prompt_id before
+    delegating (task_done pops it from currently_running), releases
+    matching holds after delegation, and never lets a release failure
+    break the queue. Idempotent per queue instance; also attempted at
+    module import and at every acquire (PromptServer.instance may not
+    exist while custom nodes load).
+    """
+    if PromptServer is None or PromptServer.instance is None:
+        return
+    queue = getattr(PromptServer.instance, "prompt_queue", None)
+    if queue is None or getattr(queue, _TASK_DONE_WRAP_FLAG, False):
+        return
+    original = queue.task_done
+
+    def task_done(item_id, *args, **kwargs):
+        prompt_id = None
+        try:
+            with queue.mutex:
+                item = queue.currently_running.get(item_id)
+                if item is not None:
+                    candidate = (item[1] if isinstance(item, tuple)
+                                 and len(item) > 1 else None)
+                    if isinstance(candidate, str) and candidate:
+                        prompt_id = candidate
+        except Exception:
+            prompt_id = None
+        try:
+            return original(item_id, *args, **kwargs)
+        finally:
+            if prompt_id is not None:
+                try:
+                    _release_chain_runs_held_by_prompt(prompt_id)
+                except Exception:
+                    # The queue must survive any release-path fault.
+                    _LOG.exception(
+                        "H3 chain run-lock release at prompt end failed "
+                        "for prompt %s.", prompt_id)
+
+    try:
+        queue.task_done = task_done
+        setattr(queue, _TASK_DONE_WRAP_FLAG, True)
+    except Exception:
+        _LOG.warning(
+            "H3 chain run-lock task_done wrapper could not install; "
+            "dead-holder takeover rests on prompt-id aliveness alone.")
+
+
+_install_chain_run_task_done_release()
+
 
 class EditorialConflictError(ValueError):
     """The final-cut sidecar changed after a browser loaded its snapshot."""
@@ -18237,10 +18432,18 @@ class MiniMaxH3ChainLoopStart:
                 "plan": (PLAN_TYPE, {
                     "tooltip": "Validated output from H3 Chain Plan."}),
                 "start_clip": ("INT", {
-                    "default": 1, "min": 1, "max": MAX_SHOTS,
-                    "tooltip": "Legacy/resume scene to render next. Use 1 for "
-                               "a new chain. A non-empty scene_range overrides "
-                               "this value. "
+                    "default": 1, "min": 0, "max": MAX_SHOTS,
+                    "tooltip": "Scene to render next. 1 renders scene 1 "
+                               "from scratch (explicit; the default). "
+                               "0 auto-resumes from the saved lineage: "
+                               "the newest pending next-scene handoff, "
+                               "else one past the highest contiguous "
+                               "saved checkpoint, else scene 1 — so a "
+                               "bare requeue after top_level_requeue "
+                               "continues instead of re-rendering scene "
+                               "1. A non-empty scene_range overrides "
+                               "this value and requires an explicit "
+                               "scene number. "
                                "A value above 1 loads and validates the saved "
                                "checkpoint for the preceding scene before "
                                "resuming."}),
@@ -18313,63 +18516,87 @@ class MiniMaxH3ChainLoopStart:
               initial_state=None):
         if initial_state is None:
             _require_plan_write(plan, "queue or resume generation")
-            alternate = _alternate_take_descriptor(plan)
-            if alternate is not None:
-                start_clip = int(alternate["scene"])
-                scene_range = str(start_clip)
-            prepared_plan = _plan_with_external_context(plan, external_context)
-            if source_timeline is None and isinstance(
-                    plan.get("source_timeline"), dict):
-                source_timeline = _source_timeline_from_recovery(
-                    plan["source_timeline"])
-            verification = _ResumeArtifactVerification()
-            preflight_started = time.perf_counter()
-            _throw_if_review_interrupted()
-            _LOG.info("H3 Loop Start: preflight and context-checkpoint verification...")
-            _dry_plan, preflight = _preflight_chain(
-                prepared_plan, source_timeline=source_timeline,
-                start_clip=start_clip,
-                scene_range=scene_range,
-                verify_resume_history=verify_resume_history,
-                tagged_references=tagged_references,
-                artifact_verification=verification)
-            _LOG.info(
-                "H3 Loop Start preflight finished in %.2fs; "
-                "hashed %d files (%.2f GiB).",
-                time.perf_counter() - preflight_started,
-                verification.hashed_files, verification.hashed_bytes / 1024**3)
-            _throw_if_review_interrupted()
-            if not preflight["ok"]:
-                raise ValueError(_preflight_failure_text(preflight))
-            for issue in preflight["warnings"]:
-                _LOG.warning("%s", _preflight_failure_text({
-                    "summary": "H3 preflight warning.",
-                    "errors": [issue],
-                }))
-            restore_started = time.perf_counter()
-            verified_files = verification.hashed_files
-            _LOG.info("H3 Loop Start: preparing source media and resume context...")
-            runtime_timeline = None
-            create_project(os.path.join(_output_root(), "h3_chains", _strict_run_name(plan["run_name"])))
-            if source_timeline is not None:
-                prepared_plan, runtime_timeline = _plan_with_source_timeline(
-                    prepared_plan, source_timeline)
-            else:
-                prepared_plan = _plan_without_source_timeline(prepared_plan)
-            range_start, range_end = _parse_scene_range(
-                scene_range, len(prepared_plan["shots"]), start_clip)
-            state = _initial_state(
-                prepared_plan, range_start, range_end,
-                external_context=external_context if range_start == 1 else None,
-                source_timeline=runtime_timeline,
-                verify_resume_history=verify_resume_history,
-                artifact_verification=verification)
-            state["scene_range_explicit"] = bool(str(scene_range or "").strip())
-            _LOG.info(
-                "H3 Loop Start scene %d ready: source/resume state %.2fs; "
-                "reused %d unchanged file hashes, hashed %d additional files.",
-                range_start, time.perf_counter() - restore_started,
-                verification.reused_files, verification.hashed_files - verified_files)
+            # 2026-10-28 retest gap 1: start_clip 0 = auto-resume from
+            # the saved lineage, so a bare requeue after
+            # top_level_requeue continues at the checkpointed scene
+            # instead of re-rendering scene 1. Resolve BEFORE acquiring
+            # the run lock: a resolution failure must not hold the run.
+            if int(start_clip) == 0:
+                if str(scene_range or "").strip():
+                    raise ValueError(
+                        "H3 Loop Start: scene_range requires an explicit "
+                        "start_clip; 0 means auto-resume from the saved "
+                        "lineage and cannot bound a range.")
+                start_clip = _resolve_auto_start_clip(plan)
+            # THE RUN-LEVEL CHAIN LOCK (fix 3): one prompt owns a
+            # run_name at a time. The recursive re-entry below
+            # (initial_state carried) is the SAME prompt — no
+            # re-acquire, no release. A refusal or preflight failure
+            # after this line must RELEASE (a refused preflight that
+            # held the run would brick the next press for the stale
+            # window).
+            _acquire_chain_run(plan["run_name"])
+            try:
+                alternate = _alternate_take_descriptor(plan)
+                if alternate is not None:
+                    start_clip = int(alternate["scene"])
+                    scene_range = str(start_clip)
+                prepared_plan = _plan_with_external_context(plan, external_context)
+                if source_timeline is None and isinstance(
+                        plan.get("source_timeline"), dict):
+                    source_timeline = _source_timeline_from_recovery(
+                        plan["source_timeline"])
+                verification = _ResumeArtifactVerification()
+                preflight_started = time.perf_counter()
+                _throw_if_review_interrupted()
+                _LOG.info("H3 Loop Start: preflight and context-checkpoint verification...")
+                _dry_plan, preflight = _preflight_chain(
+                    prepared_plan, source_timeline=source_timeline,
+                    start_clip=start_clip,
+                    scene_range=scene_range,
+                    verify_resume_history=verify_resume_history,
+                    tagged_references=tagged_references,
+                    artifact_verification=verification)
+                _LOG.info(
+                    "H3 Loop Start preflight finished in %.2fs; "
+                    "hashed %d files (%.2f GiB).",
+                    time.perf_counter() - preflight_started,
+                    verification.hashed_files, verification.hashed_bytes / 1024**3)
+                _throw_if_review_interrupted()
+                if not preflight["ok"]:
+                    raise ValueError(_preflight_failure_text(preflight))
+                for issue in preflight["warnings"]:
+                    _LOG.warning("%s", _preflight_failure_text({
+                        "summary": "H3 preflight warning.",
+                        "errors": [issue],
+                    }))
+                restore_started = time.perf_counter()
+                verified_files = verification.hashed_files
+                _LOG.info("H3 Loop Start: preparing source media and resume context...")
+                runtime_timeline = None
+                create_project(os.path.join(_output_root(), "h3_chains", _strict_run_name(plan["run_name"])))
+                if source_timeline is not None:
+                    prepared_plan, runtime_timeline = _plan_with_source_timeline(
+                        prepared_plan, source_timeline)
+                else:
+                    prepared_plan = _plan_without_source_timeline(prepared_plan)
+                range_start, range_end = _parse_scene_range(
+                    scene_range, len(prepared_plan["shots"]), start_clip)
+                state = _initial_state(
+                    prepared_plan, range_start, range_end,
+                    external_context=external_context if range_start == 1 else None,
+                    source_timeline=runtime_timeline,
+                    verify_resume_history=verify_resume_history,
+                    artifact_verification=verification)
+                state["scene_range_explicit"] = bool(str(scene_range or "").strip())
+                _LOG.info(
+                    "H3 Loop Start scene %d ready: source/resume state %.2fs; "
+                    "reused %d unchanged file hashes, hashed %d additional files.",
+                    range_start, time.perf_counter() - restore_started,
+                    verification.reused_files, verification.hashed_files - verified_files)
+            except BaseException:
+                _release_chain_run(plan["run_name"])
+                raise
         else:
             state = dict(initial_state)
             prepared_plan = state["plan"]
@@ -22147,6 +22374,52 @@ def _write_next_scene_handoff(plan: dict[str, Any], index: int,
         handoff_id=handoff_id, working_branch_id=plan.get("_branch_id", "main"))
 
 
+def _resolve_auto_start_clip(plan: dict[str, Any]) -> int:
+    """Resolve Loop Start start_clip=0 (auto) from the durable lineage.
+
+    Order of authority: the newest claimable next_scene handoff written
+    by Loop End in top_level_requeue mode (its scene is the exact
+    continuation point), else one past the highest contiguous saved
+    checkpoint (a partial chain resumes where it stopped), else 1 (no
+    lineage, fresh run).
+
+    @param plan the validated plan (run_name only is read; never mutated)
+    @returns the concrete starting scene, 1..len(shots)
+    """
+    run_name = str(plan.get("run_name") or "")
+    try:
+        records = _HandoffStore(_output_root()).list(run_name)
+    except Exception:
+        records = []
+    handoff_scenes = [
+        int(record["scene"]) for record in records
+        if record.get("action") == "next_scene"
+        and record.get("status") in ("pending", "queued")
+        and isinstance(record.get("scene"), int)
+        and not isinstance(record.get("scene"), bool)]
+    if handoff_scenes:
+        resolved = max(handoff_scenes)
+        source = "pending next-scene handoff"
+    else:
+        checkpoint_dir = os.path.join(_run_dir(plan), "checkpoints")
+        resolved = 1
+        while os.path.isfile(os.path.join(
+                checkpoint_dir, "clip_%04d.json" % resolved)):
+            resolved += 1
+        source = ("contiguous checkpoint lineage" if resolved > 1
+                  else "fresh run (no saved lineage)")
+    total = len(plan.get("shots") or [])
+    if total and (resolved < 1 or resolved > total):
+        raise ValueError(
+            "H3 Loop Start: auto-resume resolved to scene %d but the plan "
+            "has %d scenes. The saved lineage belongs to a different "
+            "plan; pass an explicit start_clip." % (resolved, total))
+    _LOG.info(
+        "H3 Loop Start: start_clip 0 resolved to scene %d (%s).",
+        resolved, source)
+    return resolved
+
+
 class MiniMaxH3ChainLoopEnd:
     @classmethod
     def INPUT_TYPES(cls):
@@ -22202,7 +22475,9 @@ class MiniMaxH3ChainLoopEnd:
                                "the next scene starts in a new top-level "
                                "prompt after the current prompt succeeds and "
                                "the queue/cleanup checks pass. Loop Start "
-                               "resumes from the accepted checkpoint lineage. "
+                               "resumes from the accepted checkpoint lineage "
+                               "(start_clip 0 auto-resumes at the handoff's "
+                               "scene; an explicit scene number works too). "
                                "Errors and interruptions do not auto-queue; "
                                "pending handoffs can be resumed or cancelled "
                                "manually. Stored on this node, not in Plan JSON."}),
@@ -22351,10 +22626,38 @@ class MiniMaxH3ChainLoopEnd:
             execution_mode = "recursive"
         plan = state["plan"]
         _require_plan_write(plan, "advance or finish the scene loop")
+        # THE RUN-LEVEL CHAIN LOCK (fix 3): this scene completing is
+        # the heartbeat; every prompt-terminal return below releases.
+        _heartbeat_chain_run(plan["run_name"])
         index = int(state["index"])
         if int(segment.get("index", -1)) != index:
             raise ValueError("H3 Chain End received the wrong segment for clip %d."
                              % index)
+        # THE RECURSION CEILING (2026-10-28, the swap-chain burn:
+        # recursive execution expands each next scene as a nested
+        # subgraph, and subgraph-qualified node ids stop resolving at
+        # depth >= 3 — a >2-scene recursive plan renders scene 2 then
+        # dies inside the engine with NodeNotFoundError, after the GPU
+        # work, with no diagnosis. Refuse at the FIRST expansion
+        # boundary instead: scene 1's checkpoint transaction has
+        # already committed, nothing is wasted, and the message names
+        # the mode that survives (top_level_requeue re-enters every
+        # scene as its own top-level prompt, so no depth accumulates).
+        # scene_range is respected: a 2-clip head/tail range stays
+        # legal in recursive (end_clip gates, not the plan length).
+        if execution_mode == "recursive" and index == 1:
+            end_clip_ceiling = int(state.get("end_clip", len(plan["shots"]))
+                                   or len(plan["shots"]))
+            if end_clip_ceiling > 2:
+                raise ValueError(
+                    "H3 chain: recursive execution cannot expand past clip 2 "
+                    "(subgraph-qualified node ids stop resolving at depth >= 3); "
+                    "this run owes %d clips. Set execution_mode to "
+                    "top_level_requeue on MiniMaxH3ChainLoopEnd and queue the "
+                    "same workflow again with Loop Start start_clip 0 "
+                    "(auto-resume: scene 1 is checkpointed and the next "
+                    "prompt continues from it) or an explicit next scene "
+                    "number." % end_clip_ceiling)
         from .selflift_selection import BATCH_STATE, NEXT_TAKE, continuation_state
         if segment.get(NEXT_TAKE):
             retry_state = continuation_state(state, segment[NEXT_TAKE])
@@ -22428,6 +22731,7 @@ class MiniMaxH3ChainLoopEnd:
                 _atomic_json(manifest_path, manifest)
             manifest_json = json.dumps(
                 manifest, ensure_ascii=False, indent=2, sort_keys=True)
+            _release_chain_run(plan["run_name"])
             context_length = min(
                 _plan_context_storage_length(plan), int(selected_frames.shape[0]))
             return (
@@ -22495,6 +22799,9 @@ class MiniMaxH3ChainLoopEnd:
                     "run_name", "predecessor_scene", "scene", "end_clip",
                     "workflow_fingerprint", "handoff_id", "source_revision",
                     "source_checkpoint_sha256", "transition_key")}
+                # fix 3: this prompt is terminal — the handoff driver's
+                # next prompt re-acquires cleanly.
+                _release_chain_run(plan["run_name"])
                 return {"result": result, "ui": {
                     "h3_chain_top_level_requeue": [completion]}}
 
@@ -22531,6 +22838,7 @@ class MiniMaxH3ChainLoopEnd:
                                    sort_keys=True)
         result = (manifest, manifest_json, next_state["previous_frames"],
                   next_state["previous_latent"])
+        _release_chain_run(plan["run_name"])
         if execution_mode == "top_level_requeue":
             # Only normal completion reaches here. Approve & Stop blocks Loop
             # End at the gate. The browser restores its original resume

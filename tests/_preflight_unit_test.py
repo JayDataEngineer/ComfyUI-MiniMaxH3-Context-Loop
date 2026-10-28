@@ -87,7 +87,7 @@ def deferred_timeline(frames):
     }
 
 
-def semantic_plan(prompt):
+def semantic_plan(prompt, run_name="semantic_preflight"):
     policy = chain._contract_compose_chain_policy(
         chain._contract_audio_policy("generated", "off", "on"),
         chain._contract_transition_policy("cut"),
@@ -96,7 +96,7 @@ def semantic_plan(prompt):
         json.dumps({"shots": [{
             "id": "semantic", "prompt": prompt, "length": 124,
         }]}),
-        "semantic_preflight", 64, 64, 1, "video", "head", "disabled",
+        run_name, 64, 64, 1, "video", "head", "disabled",
         "generated_audio", 0, 5.0, 8, 7, 18, "stack:auto:v1", 0,
         "guide", policy)
 
@@ -417,7 +417,12 @@ with tempfile.TemporaryDirectory() as temporary:
     # Loop Start owns its own model-free preflight invocation. Its reference
     # sockets must therefore forward the same active registry used downstream;
     # otherwise valid prompt @tags fail before Ref2VA can execute.
-    tagged_loop_plan = semantic_plan("Keep @replacement unchanged.")
+    # Each successful Loop Start holds its run_name until a prompt-terminal
+    # Loop End (the run-level chain lock) — in-process re-starts of ONE
+    # run_name are the double-press the lock refuses, so the two arms ride
+    # distinct run_names like the two prompts they emulate.
+    tagged_loop_plan = semantic_plan(
+        "Keep @replacement unchanged.", run_name="semantic_preflight_tagged")
     tagged_prompt = tagged_loop_plan["shots"][0]["prompt"]
     tagged_plan_json = json.dumps(tagged_loop_plan, sort_keys=True)
     logged_warnings = []
@@ -437,8 +442,11 @@ with tempfile.TemporaryDirectory() as temporary:
         assert any(item["code"] == "reference_registry_not_connected"
                    for item in disconnected["warnings"])
         logged_warnings.clear()
+        disconnected_plan = semantic_plan(
+            "Keep @replacement unchanged.",
+            run_name="semantic_preflight_disconnected")
         disconnected_started = chain.MiniMaxH3ChainLoopStart().start(
-            tagged_loop_plan, 1)
+            disconnected_plan, 1)
         assert disconnected_started[0] == "h3_chain"
         assert any("reference_registry_not_connected" in warning
                    for warning in logged_warnings)
