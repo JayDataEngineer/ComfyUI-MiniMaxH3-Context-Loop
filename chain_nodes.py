@@ -116,7 +116,6 @@ from .review_inventory import (
     write_review_snapshot as _write_review_snapshot,
 )
 from .prompt_history import PromptHistoryStore
-from .prompt_optimizer import describe_asset_payload, optimize_prompt_payload
 from .run_manager import RunArchiveManager, archive_policy_inputs
 from .asset_store import MAX_DIRECT_ASSET_BINDINGS, RunAssetStore
 from .reference_cache_store import (
@@ -129,7 +128,6 @@ from .project_assets import (
     ProjectAssetConflictError,
     VIDEO_EXTENSIONS,
     ProjectAssetStore,
-    normalize_asset_tag_type,
 )
 from .av_timing import (
     AUDIO_TRIM_MODE_KEY,
@@ -7872,10 +7870,9 @@ def _normalize_plan(
             "audio_duration_seconds": raw_frames / float(FPS),
         }
         if basic_prompt:
-            # Plain-language authoring draft that produced (or could still
-            # produce, via the Rich Scene Prompt Editor's optimizer) the H3
-            # `scene_prompt` above. Decorative only: never hashed into
-            # `prompt_hash` and never read by generation.
+            # Plain-language authoring draft behind the H3 `scene_prompt`
+            # above. Decorative only: never hashed into `prompt_hash` and
+            # never read by generation.
             shot["basic_prompt"] = basic_prompt
         if prompt_seed_mode == "fixed":
             shot["prompt_seed_mode"] = "fixed"
@@ -30619,27 +30616,6 @@ async def _plan_studio_source_preview(request):
     })
 
 
-async def _optimize_scene_prompt(request):
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, TypeError):
-        return web.json_response(
-            {"error": "The prompt optimizer request must contain JSON."},
-            status=400)
-    try:
-        payload = await optimize_prompt_payload(body)
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-    except RuntimeError as exc:
-        return web.json_response({"error": str(exc)}, status=502)
-    except Exception:
-        _LOG.exception("Direct prompt optimization failed")
-        return web.json_response(
-            {"error": "Direct prompt optimization failed unexpectedly. "
-             "Check the ComfyUI server log."}, status=500)
-    return web.json_response(payload)
-
-
 def _project_asset_store() -> ProjectAssetStore:
     return ProjectAssetStore(_input_root(), _output_root())
 
@@ -30839,44 +30815,6 @@ async def _project_asset_update(request):
         return web.json_response(result)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return _project_asset_error_response(exc)
-
-
-async def _project_asset_describe(request):
-    """Ask the Direct API provider to describe one asset by its tag-type.
-
-    Read-only: the result is returned for the editor to review and save
-    through the ordinary owned update route.
-    """
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, TypeError):
-        return web.json_response(
-            {"error": "The asset description request must contain JSON."},
-            status=400)
-    try:
-        if not isinstance(body, dict):
-            raise ValueError("Asset description request must be a JSON object.")
-        project = body.get("project", "")
-        asset_id = body.get("asset_id", "")
-        store = _project_asset_store()
-        entry, path = await asyncio.to_thread(store.asset, project, asset_id)
-        tag_type = normalize_asset_tag_type(
-            body.get("tag_type", entry.get("tag_type")))
-        payload = await describe_asset_payload(
-            body, entry, path, tag_type=tag_type,
-            poster_path=lambda: store.ensure_poster(project, asset_id))
-    except FileNotFoundError as exc:
-        return web.json_response({"error": str(exc)}, status=404)
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-    except RuntimeError as exc:
-        return web.json_response({"error": str(exc)}, status=502)
-    except Exception:
-        _LOG.exception("Project asset description failed")
-        return web.json_response(
-            {"error": "Asset description failed unexpectedly. "
-             "Check the ComfyUI server log."}, status=500)
-    return web.json_response(payload)
 
 
 async def _project_asset_duplicate(request):
@@ -31737,8 +31675,6 @@ if (PromptServer is not None and web is not None and
     PromptServer.instance.routes.get(
         "/minimax_h3_context_loop/plan-studio/source-waveform")(
             _plan_studio_source_waveform)
-    PromptServer.instance.routes.post(
-        "/minimax_h3_context_loop/prompt-optimize")(_optimize_scene_prompt)
     PromptServer.instance.routes.get(
         "/minimax_h3_context_loop/project-assets")(_project_asset_catalog)
     PromptServer.instance.routes.get(
@@ -31759,9 +31695,6 @@ if (PromptServer is not None and web is not None and
     PromptServer.instance.routes.post(
         "/minimax_h3_context_loop/project-assets/update")(
             _project_asset_update)
-    PromptServer.instance.routes.post(
-        "/minimax_h3_context_loop/project-assets/describe")(
-            _project_asset_describe)
     PromptServer.instance.routes.post(
         "/minimax_h3_context_loop/project-assets/duplicate")(
             _project_asset_duplicate)

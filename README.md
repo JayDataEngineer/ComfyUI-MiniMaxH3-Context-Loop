@@ -222,11 +222,6 @@ Existing workflows without a scene source keep their previous behavior.
 - Browser-driven asset imports are confined to media listed from ComfyUI
   input, another project, or an H3 recovery backup. Move other server files
   into the configured ComfyUI input directory before importing them.
-- Direct prompt optimization allows OpenAI, Gemini, and OpenRouter by default.
-  A server operator can add exact provider origins, including a local API,
-  before startup with a comma-separated
-  `H3_PROMPT_OPTIMIZER_ALLOWED_ORIGINS` value such as
-  `http://127.0.0.1:1234,https://api.example.com`.
 - New projects put scene MP4s in `generation/clips/` and assembled videos in
   `exports/videos/<scope>/`. Existing projects keep their original paths,
   including `final/`. **Assemble** can also copy to the regular ComfyUI output

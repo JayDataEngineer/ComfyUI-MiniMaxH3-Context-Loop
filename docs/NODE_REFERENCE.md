@@ -72,7 +72,7 @@ recovery layer around them.
 | Node | In → out | Use it when… |
 |---|---|---|
 | **Scene Prompt Editor** | Plan → Plan | You want the stable per-scene prompt editor and prompt history. |
-| **Rich Scene Prompt Editor (Experimental)** | Plan → Plan | You want the experimental rich editor and optional optimizer UI. |
+| **Rich Scene Prompt Editor (Experimental)** | Plan → Plan | You want the experimental rich editor with reference chips and asset-details insertion. |
 | **Plan Studio (Experimental)** | Plan and optional Source Timeline → Plan | You want editorial placement, gaps, chapter views, previews, timeline controls, or picture-only alternate final-cut takes. |
 | **Project Asset Carousel** | Project name/catalog; optional existing tagged refs or upscale model → project assets, references, Source Timeline | You want one project library instead of many loader/tag nodes. It also owns the Run's workflow write lock and exposes release/force-takeover controls. See the [Carousel guide](PROJECT_ASSETS.md). |
 | **Scene LoRA Scheduler** | Model plus lazily revealed LoRA inputs; state → scene model | Different scenes use different connected LoRA routes. |

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Project asset tag-type, tag prefix, and LLM description checks."""
+"""Project asset tag-type, tag prefix, and description persistence checks."""
 
-import asyncio
-import base64
-import importlib.util
 import pathlib
 import sys
 import tempfile
 import types
-import wave
 
 from PIL import Image
 
@@ -23,12 +19,6 @@ sys.modules.setdefault("folder_paths", folder_paths)
 
 from project_assets import (  # noqa: E402
     ProjectAssetConflictError, ProjectAssetStore, normalize_asset_tag_type)
-
-spec = importlib.util.spec_from_file_location(
-    "h3_prompt_optimizer_description_unit", ROOT / "prompt_optimizer.py")
-optimizer = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = optimizer
-spec.loader.exec_module(optimizer)
 
 
 def rejected(function, *args):
@@ -135,100 +125,11 @@ def store_checks(root):
     return picture
 
 
-def describe_checks(root, picture):
-    for tag_type, needle in (
-            ("char", "Ignore every prop"), ("scene", "Ignore all characters"),
-            ("object", "Describe only the specific prop"),
-            ("style", "not what it depicts")):
-        assert needle in optimizer.asset_describe_instruction(tag_type, "image")
-    assert "character voice" in optimizer.asset_describe_instruction(
-        "char", "audio")
-    custom = optimizer.asset_describe_instruction("vehicle", "image", "car")
-    assert "Category: vehicle" in custom and "@car" in custom
-    seeded = optimizer.asset_describe_instruction(
-        "object", "image", subject="the brass watch")
-    assert "The subject to describe is: the brass watch." in seeded
-    assert "confirmed it is present" in seeded
-    # No "not visible" escape hatch for weak vision models to take.
-    assert "not visible" not in seeded
-
-    parts = optimizer.asset_describe_media_parts(
-        "image", str(picture), "openai")
-    assert parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert optimizer.asset_describe_media_parts(
-        "image", str(picture), "gemini")[0]["inlineData"]["mimeType"] \
-        == "image/png"
-    video = root / "clip.mp4"
-    video.write_bytes(b"not really a video")
-    still = optimizer.asset_describe_media_parts(
-        "video", str(video), "responses", lambda: str(picture))
-    assert still[0]["type"] == "input_image"
-    inline = optimizer.asset_describe_media_parts(
-        "video", str(video), "gemini", lambda: str(picture))
-    assert inline[0]["inlineData"]["mimeType"] == "video/mp4"
-    audio = root / "voice.wav"
-    with wave.open(str(audio), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(8000)
-        handle.writeframes(b"\x00\x00" * 80)
-    sound = optimizer.asset_describe_media_parts(
-        "audio", str(audio), "openai")[0]["input_audio"]
-    assert sound["format"] == "wav" and base64.b64decode(sound["data"])
-    assert "Gemini Native" in rejected(
-        optimizer.asset_describe_media_parts, "audio", str(audio),
-        "responses")
-
-    calls = []
-
-    def fake_call(*args, **kwargs):
-        calls.append((args, kwargs))
-        return "A red square."
-
-    original = optimizer.call_direct_optimizer
-    optimizer.call_direct_optimizer = fake_call
-    try:
-        # Media access off (absent, false, or a truthy non-boolean): the
-        # request is refused before any provider call or media read.
-        for allow in ({}, {"allow_media": False}, {"allow_media": "true"}):
-            try:
-                asyncio.run(optimizer.describe_asset_payload(
-                    {"api_url": "https://api.openai.com/v1", "model": "m",
-                     **allow},
-                    {"kind": "image", "tag": "alice"}, str(picture),
-                    tag_type="object"))
-            except ValueError as exc:
-                assert "Allow Direct API to read reference media" in str(exc)
-            else:
-                raise AssertionError("Describe ran with media access off")
-        assert calls == [], "no provider request may be made"
-        result = asyncio.run(optimizer.describe_asset_payload(
-            {"api_url": "https://api.openai.com/v1", "model": "m",
-             "allow_media": True, "timeout_seconds": 1800,
-             "notes": "Not visible.", "subject": "the red block"},
-            {"kind": "image", "tag": "alice"}, str(picture),
-            tag_type="object"))
-    finally:
-        optimizer.call_direct_optimizer = original
-    assert result["description"] == "A red square."
-    (_url, _key, _model, api_format, instruction, media, system), kwargs = calls[0]
-    assert kwargs == {"timeout_seconds": 1800}
-    assert api_format == "openai" and len(media) == 1
-    # A previous description is never fed back as a hint.
-    assert "Category: object" in instruction
-    assert "Not visible." not in instruction
-    assert "the red block" in instruction
-    assert system == optimizer.ASSET_DESCRIBE_SYSTEM
-
-
 def main():
     with tempfile.TemporaryDirectory() as temporary:
-        root = pathlib.Path(temporary)
-        picture = store_checks(root)
-        describe_checks(root, picture)
-    print("H3 Project Asset descriptions: tag-type, prefix naming, subject, "
-          "late-result guard, media gate, and Direct API describe requests "
-          "pass")
+        store_checks(pathlib.Path(temporary))
+    print("H3 Project Asset catalog: tag-type, prefix naming, description, "
+          "subject, and late-result guard pass")
 
 
 if __name__ == "__main__":

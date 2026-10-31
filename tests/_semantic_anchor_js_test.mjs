@@ -2,7 +2,6 @@
 
 import assert from "node:assert/strict";
 import {
-    richGuideInstruction,
     tokenizeRichPrompt,
 } from "../web/h3_rich_prompt_editor_core.mjs";
 
@@ -40,7 +39,4 @@ const semanticOnly = refs.find((item) => item.text === "#door");
 assert.equal(semanticOnly.record, records[1]);
 assert.equal(semanticOnly.record.previewUrl, "/project-assets/door");
 
-const instruction = richGuideInstruction("general", "Ref2VA");
-assert.match(instruction, /bare #picture semantic visual/);
-
-console.log("H3 semantic-anchor prompt chips and optimizer preservation pass");
+console.log("H3 semantic-anchor prompt chips pass");

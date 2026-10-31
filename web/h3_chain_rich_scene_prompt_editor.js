@@ -13,21 +13,6 @@ import {
     sharedPrompt,
 } from "./h3_chain_plan_core.mjs?v=0.7.12";
 import {
-    buildPromptAssistantContext,
-    makePromptAssistRequest,
-} from "./h3_prompt_assistant_core.mjs?v=0.7.9";
-import {PromptAssistantClient} from "./h3_prompt_assistant_client.mjs?v=0.7.3";
-import {
-    directOptimizerConfigurationError,
-    makeDirectPromptOptimizeRequest,
-} from "./h3_prompt_optimizer_core.mjs?v=0.7.4";
-import {
-    openPromptOptimizerSettings,
-    promptOptimizerBackend,
-    promptOptimizerDirectConfig,
-    promptOptimizerMcpProvider,
-} from "./h3_prompt_optimizer_settings.js";
-import {
     promptRevisionHelp,
     promptRevisionLabel,
     promptRevisionNavigation,
@@ -43,12 +28,8 @@ import {
 } from "./h3_reference_preview_core.mjs?v=0.7.27";
 import {
     PromptUndoHistory,
-    RICH_PROMPT_GUIDES,
-    normalizeRichGuide,
-    optimizerSource,
     promptUndoDirection,
     richGenerationMode,
-    richGuideInstruction,
     revealPromptCaret,
     tokenizeRichPrompt,
 } from "./h3_rich_prompt_editor_core.mjs?v=0.7.6";
@@ -63,7 +44,6 @@ import {
 } from "./h3_project_asset_sync_core.mjs?v=0.7.3";
 import {
     ASSET_DETAILS_CHANGED_EVENT,
-    assetDetailContext,
     assetDetailEntries,
     insertAssetDetails,
     staleAssetDetails,
@@ -91,16 +71,15 @@ function publishCompanionPrompt(...args) {
     return promptCompanionSync.publishCompanionPrompt?.(...args) ?? 0;
 }
 
-// The rich mention presentation and compact optimizer interaction are inspired
-// by nkxx188/ComfyUI-MiniMaxH3-Easy (MIT). Graph discovery, scene scheduling,
-// revision storage, and Codex/Hermes bridge integration are implemented here.
+// The rich mention presentation is inspired by nkxx188/ComfyUI-MiniMaxH3-Easy
+// (MIT). Graph discovery, scene scheduling, and revision storage are
+// implemented here.
 
 const NODE_NAME = "MiniMaxH3ChainRichScenePromptEditor";
 const PLAN_NAME = "MiniMaxH3ChainPlan";
 const PLAN_NAMES = new Set([PLAN_NAME, "MiniMaxH3ChainPlanModern"]);
 const ACTIVE_PROPERTY = "h3_rich_prompt_active_scene";
 const FONT_PROPERTY = "h3_rich_prompt_font_size";
-const GUIDE_PROPERTY = "h3_rich_prompt_guide";
 const PRESENTATION_PROPERTY = "h3_rich_prompt_rich_text";
 const DEFAULT_FONT = 17;
 const MIN_FONT = 12;
@@ -420,31 +399,6 @@ function referenceMediaPreview(record, kind) {
     return findMediaPreview(record?.source, kind);
 }
 
-function findMediaAsset(start, kind) {
-    const queue = [start];
-    const seen = new Set();
-    while (queue.length) {
-        const candidate = queue.shift();
-        if (!candidate || seen.has(candidate)) continue;
-        seen.add(candidate);
-        for (const widget of candidate.widgets ?? []) {
-            const asset = widgetAsset(widget.value, kind);
-            if (asset && !asset.url) {
-                return {
-                    filename:asset.filename,
-                    subfolder:asset.subfolder ?? "",
-                    storage:asset.type ?? "input",
-                };
-            }
-        }
-        for (const input of candidate.inputs ?? []) {
-            const parent = inputSource(candidate, input.name);
-            if (parent) queue.push(parent);
-        }
-    }
-    return null;
-}
-
 function clamp(value, minimum, maximum, fallback) {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? Math.max(minimum, Math.min(maximum, Math.round(numeric))) : fallback;
@@ -629,12 +583,6 @@ function insertPlainText(editor, text) {
     editor.dispatchEvent(new Event("input", {bubbles:true}));
 }
 
-function promptAssistantIdentityKey(node) {
-    const workflow = app.extensionManager?.workflow?.activeWorkflow;
-    const workflowIdentity = workflow?.path ?? workflow?.activeState?.id ?? workflow?.filename ?? "legacy-workflow";
-    return `rich-workflow-${workflowIdentity}-node-${node.id ?? "new"}`;
-}
-
 function mount(node) {
     if (node._h3RichPromptMounted || typeof node.addDOMWidget !== "function") return;
     node._h3RichPromptMounted = true;
@@ -667,17 +615,14 @@ function mount(node) {
         plan:null, planNode:null, planWidget:null, lastValue:"", lastRunName:"",
         active:Math.max(0, Number(node.properties[ACTIVE_PROPERTY]) || 0),
         fontSize:clamp(node.properties[FONT_PROPERTY], MIN_FONT, MAX_FONT, DEFAULT_FONT),
-        guide:normalizeRichGuide(node.properties[GUIDE_PROPERTY]),
         decorated:promptEditorRichText(node.properties, PRESENTATION_PROPERTY, promptEditorPreferences()),
-        records:[], referenceMode:null, editor:null, refs:null, status:null, optimizerStatus:null,
+        records:[], referenceMode:null, editor:null, refs:null, status:null,
         referenceSyntax:new Map(),
         promptSelection:null,
         completion:null, schema:null,
         history:{sceneKey:"", data:null, revisionId:null, host:null, loadToken:0, loadPromise:null,
             saveTimer:null, pendingDraft:null, savePromise:null, error:"", treeOpen:false,
             showArchived:false},
-        optimizer:{client:null, preparing:false, requestId:null, meta:null, origins:new Map(), providers:null,
-            abortController:null, activeBackend:null, error:"", message:"", pendingResult:null},
         undoByScene:new Map(), promptUndo:null,
         popover:null, popoverTimer:null, popoverPinned:false, pollTimer:null,
         planSyncTimer:null, planSyncPending:null, analysisTimer:null,
@@ -705,7 +650,6 @@ function mount(node) {
     function persistView() {
         node.properties[ACTIVE_PROPERTY] = state.active;
         node.properties[FONT_PROPERTY] = state.fontSize;
-        node.properties[GUIDE_PROPERTY] = state.guide;
         node.properties[PRESENTATION_PROPERTY] = state.decorated;
         dirty();
     }
@@ -1678,157 +1622,16 @@ function mount(node) {
         }
     }
 
-    function optimizerSceneKey(index = state.active) {
-        const shot = state.plan?.shots?.[index];
-        return `${index}:${String(shot?.id || `clip_${String(index + 1).padStart(4, "0")}`)}`;
-    }
-
-    function optimizerBusy() {
-        return Boolean(state.optimizer.preparing || state.optimizer.requestId);
-    }
-
-    function optimizerProviders() {
-        const advertised = Array.isArray(state.optimizer.providers)
-            ? state.optimizer.providers.filter((item) => item && typeof item.id === "string") : [];
-        return advertised;
-    }
-
-    function optimizerProviderLabel(id = promptOptimizerMcpProvider()) {
-        return optimizerProviders().find((item) => item.id === id)?.label || id;
-    }
-
-    function refreshOptimizerUi() {
-        const busy = optimizerBusy();
-        if (busy) state.completion?.hide();
-        if (state.editor) state.editor.contentEditable = busy ? "false" : "true";
-        for (const control of root.querySelectorAll("[data-h3rp-lock]")) control.disabled = busy;
-        const optimize = root.querySelector(".h3rp-optimize");
-        if (optimize) {
-            const backend = promptOptimizerBackend();
-            optimize.disabled = busy || backend === "disabled";
-            optimize.title = backend === "disabled"
-                ? "Prompt optimization is disabled in ComfyUI Settings → MiniMax H3 Context Loop → Prompt optimizer."
-                : `Optimize through ${backend === "mcp" ? `MCP agent (${promptOptimizerMcpProvider()})` : "the configured Direct API"}. The result becomes a reversible prompt revision.`;
-        }
-        const stop = root.querySelector(".h3rp-stop");
-        if (stop) stop.hidden = !state.optimizer.requestId;
-        const applyPending = root.querySelector(".h3rp-apply-pending");
-        if (applyPending) applyPending.hidden = !state.optimizer.pendingResult;
-        if (state.optimizerStatus) {
-            state.optimizerStatus.className = `h3rp-status${state.optimizer.error ? " h3rp-status-error" : state.optimizer.message ? " h3rp-status-success" : ""}`;
-            state.optimizerStatus.textContent = state.optimizer.error || state.optimizer.message || (busy ? "Optimizing…" : "");
-        }
-    }
-
-    function handleOptimizerFrame(frame) {
-        if (!frame || typeof frame !== "object") return;
-        if (frame.type === "prompt_assist_ready") {
-            state.optimizer.providers = Array.isArray(frame.providers) ? frame.providers : null;
-            return;
-        }
-        // A previously connected bridge may still emit a late frame while a
-        // Direct API request is active. Never let that frame cancel or replace
-        // the direct result.
-        if (state.optimizer.activeBackend !== "mcp") return;
-        if (frame.type === "prompt_assist_started" && frame.request_id === state.optimizer.requestId) {
-            state.optimizer.message = `Optimizing with ${optimizerProviderLabel()}…`;
-        } else if (frame.type === "prompt_assist_progress" && frame.request_id === state.optimizer.requestId) {
-            state.optimizer.message = "Agent is drafting…";
-        } else if (frame.type === "prompt_assist_result" && frame.request_id === state.optimizer.requestId) {
-            const meta = state.optimizer.meta;
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.activeBackend = null;
-            const result = typeof frame.rewritten_prompt === "string" ? frame.rewritten_prompt : null;
-            if (!result?.trim()) {
-                state.optimizer.error = "The optimizer returned no replacement prompt.";
-            } else {
-                const shot = state.plan?.shots?.[meta.sceneIndex];
-                const current = shot ? promptValueToText(shot.prompt) : "";
-                if (!shot || String(shot.id || "") !== meta.sceneId || current !== meta.currentAtRequest) {
-                    state.optimizer.pendingResult = {...meta, result};
-                    state.optimizer.error = "The scene changed while optimizing; the result was not applied.";
-                } else {
-                    recordPromptReplacement(meta.sceneIndex, shot, result);
-                    shot.prompt = promptTextToLines(result);
-                    markShotFieldEdited(shot, "prompt");
-                    state.optimizer.origins.set(meta.sceneKey, {source:meta.source, result});
-                    writePlan("Optimized prompt saved to Plan");
-                    if (state.active === meta.sceneIndex) {
-                        refreshTaggedReferencesForShot(result);
-                        renderEditorText(result);
-                        scheduleHistoryDraft(meta.sceneId, result, shot.basic_prompt);
-                        void flushHistoryDraft();
-                    }
-                    state.optimizer.message = frame.message || "Optimized prompt saved as a new revision.";
-                    state.optimizer.error = "";
-                }
-            }
-        } else if (frame.type === "prompt_assist_error"
-                && (!frame.request_id || frame.request_id === state.optimizer.requestId)) {
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.activeBackend = null;
-            state.optimizer.error = String(frame.error || "Prompt optimization failed.");
-        } else if (frame.type === "prompt_assist_cancelled" && frame.request_id === state.optimizer.requestId) {
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.activeBackend = null;
-            state.optimizer.message = "Optimization stopped; the prompt was not changed.";
-        } else if (frame.type === "prompt_assist_cancel_ack" && frame.cancelled === false
-                && frame.request_id === state.optimizer.requestId) {
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.activeBackend = null;
-            state.optimizer.error = "The optimizer request is no longer active.";
-        }
-        refreshOptimizerUi();
-    }
-
-    function applyPendingOptimizerResult() {
-        const pending = state.optimizer.pendingResult;
-        if (!pending) return;
-        const shot = state.plan?.shots?.[pending.sceneIndex];
-        if (!shot || String(shot.id || "") !== pending.sceneId) {
-            state.optimizer.error = "The optimized result belongs to a scene that no longer exists.";
-            state.optimizer.pendingResult = null;
-            refreshOptimizerUi();
-            return;
-        }
-        recordPromptReplacement(pending.sceneIndex, shot, pending.result);
-        shot.prompt = promptTextToLines(pending.result);
-        markShotFieldEdited(shot, "prompt");
-        state.optimizer.origins.set(pending.sceneKey, {source:pending.source, result:pending.result});
-        state.optimizer.pendingResult = null;
-        state.optimizer.error = "";
-        state.optimizer.message = "Changed source replaced explicitly; result saved as a new revision.";
-        writePlan("Optimized prompt saved to Plan");
-        if (state.active === pending.sceneIndex) {
-            refreshTaggedReferencesForShot(pending.result);
-            renderEditorText(pending.result);
-            scheduleHistoryDraft(pending.sceneId, pending.result, shot.basic_prompt);
-            void flushHistoryDraft();
-        }
-        refreshOptimizerUi();
-    }
-
-    // A tag can appear only in the basic prompt, not yet in the H3 prompt
-    // text an applied optimizer result replaces. Refresh the reference
-    // tray/highlighting against the shot's current basic_prompt as well as
-    // the new H3 text before redrawing, or a tag that Optimize just turned
-    // into real content stays shown "inactive" until an unrelated manual
-    // edit happens to trigger a refresh.
+    // Refresh the reference tray/highlighting against the shared prompt
+    // plus the freshly written H3 text before redrawing, so a tag the
+    // inserted details just turned into real content never lingers shown
+    // "inactive" until an unrelated manual edit happens to refresh it.
     function refreshTaggedReferencesForShot(text) {
         if (state.referenceMode !== "tagged") return;
-        // Deliberately scans the shared prompt plus the resulting H3 text
-        // only, not basic_prompt: this refresh runs AFTER an optimizer
-        // result has been applied, and it must reflect what generation will
-        // actually compile from (_active_reference_bindings, server-side,
-        // never looks at basic_prompt). A tag present only in the basic
-        // draft and omitted from the rewrite must show inactive here even
-        // though it was legitimately included when preparing the optimizer
-        // request itself (see optimizePrompt()'s own reference scan, which
-        // does include basic_prompt for that separate purpose).
+        // Deliberately scans the shared prompt plus the new H3 text only,
+        // not basic_prompt: this must reflect what generation will actually
+        // compile from (_active_reference_bindings, server-side, never
+        // looks at basic_prompt).
         const refreshed = availableReferenceRecords(
             node, state.active + 1, {
                 includeInactive:true,
@@ -1838,25 +1641,6 @@ function mount(node) {
         );
         state.records = refreshed.records;
         state.referenceMode = refreshed.mode;
-    }
-
-    function optimizerInstruction(mode, refs, basicPrompt = "") {
-        const referenceSummary = refs.records.length
-            ? refs.records.map((record) => {
-                const mapping = record.label && record.label !== record.token
-                    ? ` -> ${record.label}` : "";
-                return `${record.token}${mapping} (${record.kind}, ${record.active ? "active" : "inactive"})`;
-            }).join(", ")
-            : "none discovered";
-        const basic = String(basicPrompt ?? "").trim();
-        const contentDirective = basic
-            ? `Base the rewrite on this plain-language scene idea, expressed in the required H3 style: ${basic} `
-            : "";
-        const details = assetDetailContext(assetDetailEntries(refs.records));
-        const detailDirective = details.length
-            ? " Carousel descriptions of these references are in context.asset_details; use them to define the tagged subjects, settings, and style, and do not contradict them."
-            : "";
-        return `${contentDirective}${richGuideInstruction(state.guide, mode)} Connected scene references: ${referenceSummary}.${detailDirective}`;
     }
 
     // Remember, per viewer, the exact lines this editor inserted so a later
@@ -1912,20 +1696,15 @@ function mount(node) {
     }
 
     function insertSceneAssetDetails() {
-        if (optimizerBusy()) return;
         const scene = sceneAssetDetails();
         if (!scene) return;
         if (!scene.entries.length) {
-            state.optimizer.error = "";
-            state.optimizer.message = "No tagged asset in this scene has a description yet. Add one in the Asset Carousel.";
-            refreshOptimizerUi();
+            state.status.textContent = "No tagged asset in this scene has a description yet. Add one in the Asset Carousel.";
             return;
         }
         const result = insertAssetDetails(scene.text, scene.entries, {refresh:scene.stale});
         if (!result.inserted.length && !result.refreshed.length) {
-            state.optimizer.error = "";
-            state.optimizer.message = "Every described @tag in this scene already has its details.";
-            refreshOptimizerUi();
+            state.status.textContent = "Every described @tag in this scene already has its details.";
             return;
         }
         const {shot, shotId} = scene;
@@ -1943,193 +1722,8 @@ function mount(node) {
         const parts = [];
         if (result.inserted.length) parts.push(`inserted ${result.inserted.map(leading).join(", ")}`);
         if (result.refreshed.length) parts.push(`refreshed ${result.refreshed.map(leading).join(", ")}`);
-        state.optimizer.error = "";
-        state.optimizer.message = `Asset details ${parts.join("; ")}.`;
-        refreshOptimizerUi();
+        state.status.textContent = `Asset details ${parts.join("; ")}.`;
         refreshAssetDetailsUi();
-    }
-
-    function optimizerMeta(sceneIndex, sceneId, sceneKey, source, current) {
-        return {sceneIndex, sceneId, sceneKey, source, currentAtRequest:current};
-    }
-
-    function optimizerResources(refs) {
-        return refs.records.filter((record) => record.active).map((record) => ({
-            type:record.kind === "picture" ? "image" : record.kind,
-            tag:record.token,
-            asset:findMediaAsset(
-                record.source, record.kind === "picture" ? "image" : record.kind),
-        })).filter((resource) => resource.asset);
-    }
-
-    function applyOptimizerResponse(result, message, meta) {
-        if (!result?.trim()) {
-            state.optimizer.error = "The optimizer returned no replacement prompt.";
-            return;
-        }
-        const shot = state.plan?.shots?.[meta.sceneIndex];
-        const current = shot ? promptValueToText(shot.prompt) : "";
-        if (!shot || String(shot.id || "") !== meta.sceneId || current !== meta.currentAtRequest) {
-            state.optimizer.pendingResult = {...meta, result};
-            state.optimizer.error = "The scene changed while optimizing; the result was not applied.";
-            return;
-        }
-        recordPromptReplacement(meta.sceneIndex, shot, result);
-        shot.prompt = promptTextToLines(result);
-        markShotFieldEdited(shot, "prompt");
-        state.optimizer.origins.set(meta.sceneKey, {source:meta.source, result});
-        writePlan("Optimized prompt saved to Plan");
-        if (state.active === meta.sceneIndex) {
-            refreshTaggedReferencesForShot(result);
-            renderEditorText(result);
-            scheduleHistoryDraft(meta.sceneId, result, shot.basic_prompt);
-            void flushHistoryDraft();
-        }
-        state.optimizer.message = message || "Optimized prompt saved as a new revision.";
-        state.optimizer.error = "";
-    }
-
-    async function optimizeDirect(requestId, instruction, context, resources, meta, config) {
-        const abortController = new AbortController();
-        state.optimizer.abortController = abortController;
-        state.optimizer.requestId = requestId;
-        state.optimizer.preparing = false;
-        state.optimizer.activeBackend = "direct";
-        state.optimizer.meta = meta;
-        state.optimizer.message = "Optimizing with Direct API…";
-        refreshOptimizerUi();
-        try {
-            const body = makeDirectPromptOptimizeRequest({
-                config, instruction, context, resources,
-            });
-            const response = await api.fetchApi("/minimax_h3_context_loop/prompt-optimize", {
-                method:"POST", headers:{"Content-Type":"application/json"},
-                body:JSON.stringify(body), signal:abortController.signal,
-            });
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(payload.error || `Direct prompt optimizer failed (HTTP ${response.status}).`);
-            if (state.optimizer.requestId !== requestId) return;
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.abortController = null;
-            state.optimizer.activeBackend = null;
-            applyOptimizerResponse(String(payload.prompt || ""), payload.message, meta);
-        } catch (error) {
-            if (state.optimizer.requestId !== requestId) return;
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.abortController = null;
-            state.optimizer.activeBackend = null;
-            if (error?.name === "AbortError") state.optimizer.message = "Optimization stopped; the prompt was not changed.";
-            else state.optimizer.error = error?.message || String(error);
-        }
-        refreshOptimizerUi();
-    }
-
-    async function optimizeMcp(requestId, instruction, context, meta) {
-        const provider = promptOptimizerMcpProvider();
-        await state.optimizer.client.connect();
-        const selected = state.optimizer.providers?.find((item) => item.id === provider);
-        if (!selected) throw new Error(`${provider} is not supported by this comfyui-mcp prompt bridge.`);
-        if (selected.available === false) {
-            throw new Error(`${selected.label || provider} is unavailable${selected.reason ? `: ${selected.reason}` : "."}`);
-        }
-        state.optimizer.client.reset();
-        const request = makePromptAssistRequest({
-            requestId,
-            conversationId:state.optimizer.client.conversationId,
-            provider,
-            mode:"rewrite",
-            instruction,
-            context,
-        });
-        state.optimizer.requestId = requestId;
-        state.optimizer.preparing = false;
-        state.optimizer.activeBackend = "mcp";
-        state.optimizer.meta = meta;
-        state.optimizer.message = `Optimizing with ${optimizerProviderLabel(provider)}…`;
-        refreshOptimizerUi();
-        await state.optimizer.client.send(request);
-    }
-
-    async function optimizePrompt() {
-        if (optimizerBusy() || !state.plan?.shots?.length || !state.editor) return;
-        const backend = promptOptimizerBackend();
-        if (backend === "disabled") return;
-        const directConfig = backend === "direct" ? promptOptimizerDirectConfig() : null;
-        const configurationError = directConfig
-            ? directOptimizerConfigurationError(directConfig) : "";
-        if (configurationError) {
-            state.optimizer.error = `${configurationError} Configure it in ComfyUI Settings → MiniMax H3 Context Loop → Prompt optimizer.`;
-            state.optimizer.message = "";
-            refreshOptimizerUi();
-            void openPromptOptimizerSettings();
-            return;
-        }
-        const sceneIndex = state.active;
-        const shot = state.plan.shots[sceneIndex];
-        const sceneId = String(shot.id || `clip_${String(sceneIndex + 1).padStart(4, "0")}`);
-        const sceneKey = optimizerSceneKey(sceneIndex);
-        const current = editorPlainText(state.editor);
-        const source = optimizerSource(current, state.optimizer.origins.get(sceneKey));
-        const refs = availableReferenceRecords(node, sceneIndex + 1, {
-            includeInactive: true,
-            // A tag can be introduced in the basic prompt before it ever
-            // reaches the H3 prompt text (that is the point of Optimize).
-            // Scan it too, or a tag used only there is reported "inactive"
-            // and its media is left out of optimizerResources() below, even
-            // though it is meant to be part of this request.
-            prompt: [sharedPrompt(state.plan).text.trim(), source.trim(),
-                String(shot.basic_prompt ?? "").trim()].filter(Boolean).join("\n\n"),
-        });
-        const mode = richGenerationMode(refs.mode);
-        const context = buildPromptAssistantContext(state.plan, sceneIndex, source, {
-            includeShared:true, includeAdjacent:true,
-        });
-        context.generation_mode = mode;
-        const assetDetails = assetDetailContext(assetDetailEntries(refs.records));
-        if (assetDetails.length) context.asset_details = assetDetails;
-        const requestId = `rich-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
-        const instruction = optimizerInstruction(mode, refs, shot.basic_prompt);
-        const meta = optimizerMeta(sceneIndex, sceneId, sceneKey, source, current);
-        state.optimizer.error = "";
-        state.optimizer.pendingResult = null;
-        state.optimizer.message = backend === "mcp"
-            ? "Connecting to the isolated prompt agent…" : "Preparing Direct API request…";
-        state.optimizer.preparing = true;
-        state.optimizer.activeBackend = backend;
-        refreshOptimizerUi();
-        try {
-            if (backend === "direct") {
-                await optimizeDirect(
-                    requestId, instruction, context, optimizerResources(refs), meta, directConfig);
-            } else {
-                await optimizeMcp(requestId, instruction, context, meta);
-            }
-        } catch (error) {
-            state.optimizer.preparing = false;
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.abortController = null;
-            state.optimizer.activeBackend = null;
-            state.optimizer.error = error?.message || String(error);
-            refreshOptimizerUi();
-        }
-    }
-
-    function stopOptimizer() {
-        if (!state.optimizer.requestId) return;
-        if (state.optimizer.activeBackend === "direct") {
-            state.optimizer.requestId = null;
-            state.optimizer.meta = null;
-            state.optimizer.activeBackend = null;
-            state.optimizer.abortController?.abort();
-            state.optimizer.abortController = null;
-            state.optimizer.message = "Optimization stopped; the prompt was not changed.";
-        } else if (!state.optimizer.client.cancel(state.optimizer.requestId)) {
-            state.optimizer.error = "The bridge is disconnected; the request could not be cancelled.";
-        } else state.optimizer.message = "Stopping optimizer…";
-        refreshOptimizerUi();
     }
 
     function showFailure(message) {
@@ -2146,7 +1740,7 @@ function mount(node) {
     }
 
     function navigate(offset, absolute = null, {synchronize = true, focus = true} = {}) {
-        if (!state.plan?.shots?.length || optimizerBusy()) return;
+        if (!state.plan?.shots?.length) return;
         flushPlanEffects();
         flushPromptAnalysis();
         const pending = state.sceneNavigation;
@@ -2268,26 +1862,6 @@ function mount(node) {
         );
         presentation.classList.toggle("h3rp-presentation-active", state.decorated);
         presentation.dataset.h3rpLock = "";
-        const guide = element("select", "h3rp-guide");
-        guide.title = "Prompt Guide used by one-click optimization";
-        guide.dataset.h3rpLock = "";
-        for (const item of RICH_PROMPT_GUIDES) {
-            const option = element("option", "", item.label);
-            option.value = item.id;
-            guide.append(option);
-        }
-        guide.value = state.guide;
-        guide.addEventListener("change", () => { state.guide = normalizeRichGuide(guide.value); persistView(); });
-        const optimize = button("Optimize", "Optimize with the globally configured prompt backend.", () => void optimizePrompt(), "sparkle");
-        optimize.classList.add("h3rp-optimize");
-        const stop = button("Stop", "Cancel prompt optimization", stopOptimizer, "stop");
-        stop.classList.add("h3rp-stop");
-        stop.hidden = true;
-        const applyPending = button("Apply changed result", "Explicitly replace a scene that changed while optimization was running", applyPendingOptimizerResult, "sparkle");
-        applyPending.classList.add("h3rp-apply-pending");
-        applyPending.hidden = true;
-        const optimizerStatus = element("span", "h3rp-status");
-        state.optimizerStatus = optimizerStatus;
         const assetDetailsButton = button(
             "Asset details",
             "Insert the Asset Carousel description of every described @tag this scene uses",
@@ -2297,8 +1871,7 @@ function mount(node) {
         assetDetailsButton.dataset.h3rpLock = "";
         assetDetailsButton.addEventListener("pointerenter", refreshAssetDetailsUi);
         toolbar.replaceChildren(
-            refsButton, dialogue, presentation, assetDetailsButton, guide,
-            optimize, stop, applyPending, optimizerStatus,
+            refsButton, dialogue, presentation, assetDetailsButton,
         );
 
         const basicPromptLabel = element("details", "h3rp-basic-prompt-label");
@@ -2313,8 +1886,8 @@ function mount(node) {
         const basicPromptTextarea = element("textarea", "h3rp-basic-prompt");
         basicPromptTextarea.setAttribute("aria-label", "Basic prompt (plain language)");
         basicPromptTextarea.value = String(shot.basic_prompt ?? "");
-        basicPromptTextarea.placeholder = "Optional plain-language scene idea, kept separate from the H3-formatted prompt. Optimize turns this into the prompt below, combined with the selected Prompt Guide's style rules.";
-        basicPromptTextarea.title = "A simple draft description, not H3-formatted. Optimize sends this as content alongside the Prompt Guide's style rules.";
+        basicPromptTextarea.placeholder = "Optional plain-language scene idea, kept separate from the H3-formatted prompt.";
+        basicPromptTextarea.title = "A simple draft description, not H3-formatted.";
         basicPromptTextarea.spellcheck = true;
         basicPromptTextarea.addEventListener("input", () => {
             shot.basic_prompt = basicPromptTextarea.value;
@@ -2491,7 +2064,6 @@ function mount(node) {
         root.append(head, nav, basicPromptLabel, toolbar);
         if (state.schema) root.append(state.schema.panel);
         root.append(refs, editorShell, footer);
-        refreshOptimizerUi();
         refreshAssetDetailsUi();
         editor.addEventListener("blur", refreshAssetDetailsUi);
         void loadHistory(shotId, editorPlainText(editor));
@@ -2530,26 +2102,6 @@ function mount(node) {
             showFailure(`Connected Plan JSON is invalid:\n${error.message}`);
         }
     }
-
-    state.optimizer.client = new PromptAssistantClient({
-        identityKey:promptAssistantIdentityKey(node),
-        onFrame:handleOptimizerFrame,
-        onStatus:(status, detail) => {
-            if (detail?.providers) {
-                state.optimizer.providers = detail.providers;
-            }
-            if (status === "disconnected" && state.optimizer.requestId
-                    && state.optimizer.activeBackend === "mcp") {
-                state.optimizer.error = "Prompt-agent bridge disconnected.";
-                state.optimizer.requestId = null;
-                state.optimizer.meta = null;
-                state.optimizer.activeBackend = null;
-            }
-            refreshOptimizerUi();
-        },
-    });
-    const onOptimizerSettingsChanged = () => refreshOptimizerUi();
-    globalThis.addEventListener?.("h3-prompt-optimizer-settings-changed", onOptimizerSettingsChanged);
 
     const widget = node.addDOMWidget("h3_rich_scene_prompt_editor", "h3-rich-scene-prompt-editor", root,
         {serialize:false, hideOnZoom:false, getMinHeight:() => 560});
@@ -2664,11 +2216,6 @@ function mount(node) {
             () => globalThis.removeEventListener?.(
                 ASSET_DETAILS_CHANGED_EVENT, onAssetDetailsChanged,
             ),
-            () => state.optimizer.client?.close(),
-            () => state.optimizer.abortController?.abort(),
-            () => globalThis.removeEventListener?.(
-                "h3-prompt-optimizer-settings-changed", onOptimizerSettingsChanged,
-            ),
         ];
         for (const cleanup of cleanups) {
             try { cleanup(); }
@@ -2682,7 +2229,7 @@ function mount(node) {
         return removed?.apply(this, arguments);
     };
     node._h3PromptCompanionSetActiveScene = (planNode, index) => {
-        if (planNode !== state.planNode || !state.plan?.shots?.length || optimizerBusy()) return false;
+        if (planNode !== state.planNode || !state.plan?.shots?.length) return false;
         // Add/Duplicate publishes before our polling refresh. Load the new
         // scene list before navigate clamps the requested index or captures ID.
         loadPlan();

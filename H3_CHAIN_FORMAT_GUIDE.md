@@ -53,25 +53,12 @@ frame passes through **MiniMax H3 First-Scene Image Gate**, Picture 1 is active
 only in scene 1 and is omitted from the menu on continuation scenes.
 
 The experimental **Rich Scene Prompt Editor** adds color-coded tokens, larger
-media previews, prompt guides, revision history, and one-click **Optimize**.
-Its optimizer connection is global rather than stored on the node or in the
-workflow. Open **ComfyUI Settings → MiniMax H3 Context Loop → Prompt
-optimizer** and choose:
+media previews, revision history, and asset-details insertion (descriptions of
+the scene's tagged assets copied in from the Project Asset Carousel).
 
-- **Direct API** (default) for an OpenAI-compatible Chat Completions endpoint,
-  the OpenAI Responses format, or Gemini Native. Enter the server URL and model;
-  an API key is optional for local OpenAI-compatible servers and required for
-  Gemini Native.
-- **MCP agent** to use a provider advertised by the compatible separately
-  installed `comfyui-mcp` prompt bridge.
-- **Disabled** to turn off optimizer execution while keeping manual Studio
-  editing available.
-
-Reference-media reading is a separate opt-in setting and is off by default.
-When enabled, only reference files resolvable inside ComfyUI's input, output,
-or temp roots are considered. OpenAI-compatible and Responses requests attach
-images; Gemini Native can also receive video and audio. Provider credentials
-are saved in ComfyUI user settings and are never serialized into workflow JSON.
+ComfyUI **Settings → MiniMax H3 Context Loop → Prompt editor** controls the
+default Rich/Plain presentation, automatic suggestions, optional trailing
+spaces, and marker replacement menus; per-node presentation choices win.
 
 Use the editor's **JSON** button when you need to inspect, paste, import, or
 export the underlying plan. The JSON format below remains the runtime contract

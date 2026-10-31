@@ -217,43 +217,12 @@ Prompt Editor's **Asset details** button to copy them into a scene prompt (see
 
 | Field | What it does |
 |---|---|
-| **Tag-type** | Categorizes the asset for descriptions: **Character** (`char`) describes the character's look and ignores objects, background, and lighting; **Scene** (`scene`) describes the environment and ignores characters and objects; **Object** (`object`) describes one prop and ignores characters, background, and lighting; **Style** (`style`) extracts the visual style rather than the content. |
+| **Tag-type** | Categorizes the asset: **Character** (`char`) is a character, **Scene** (`scene`) is the environment, **Object** (`object`) is one prop, **Style** (`style`) is a visual style. |
 | **Prefix tag with tag-type** | Renames the prompt tag to `<tag-type>_<tag>`, for example `@alice` → `@char_alice`. Changing the tag-type swaps the prefix and turning it off removes it; prefixes never stack. Scene prompts that use the old tag are not rewritten. |
-| **Object to describe** | Shown for Object assets. Names the object, or which object in the media to describe (for example "the red umbrella held by the woman"). |
 | **Description** | Free text about the asset. It saves shortly after you stop typing and when you leave the field. |
 
-**Generate description** sends the asset's media and a tag-type specific
-instruction to the Direct API provider configured in **Settings → MiniMax H3
-Context Loop → Prompt optimizer**, then saves the result. Descriptions are kept
-to two or three sentences and start with "is" so they read naturally after the
-tag (`@cabinet is a tall, narrow wooden linen cabinet…`). The previous
-description is not sent, so a poor result never biases the next attempt.
-
-For slow or reasoning models, increase **Direct API timeout (seconds)** in
-the same settings (default **300**, range **30–7200**; **1800** is 30 minutes).
-This sets the provider connection/read timeout for both prompt optimization
-and asset descriptions. Requests are still non-streaming, so reasoning tokens
-are not a progress signal; provider/proxy time limits and output-token limits
-are separate. Stopping prompt optimization discards a late result, but the
-provider may continue processing the request.
-
-Generating always sends the asset's media, so it requires **Allow Direct API to
-read reference media** in the same settings. While that is off, the button
-explains why and nothing is sent; there is no per-click override. If you edit
-the description while a result is generating, the result is not saved: it is
-shown under the field with **Replace description** and **Discard**.
-
-| Media | Gemini Native | OpenAI-compatible | OpenAI Responses |
-|---|---|---|---|
-| Image | Sent | Sent | Sent |
-| Video | Whole clip (up to 32 MB) | One still frame | One still frame |
-| Audio | Sent | WAV/MP3 as `input_audio`, if the model accepts it | Not supported |
-
-A local server must be allow-listed first with
-`H3_PROMPT_OPTIMIZER_ALLOWED_ORIGINS`. The image is sent at its
-stored resolution; how much detail a local vision model sees is set by the
-server's per-image token budget (for llama.cpp-based servers,
-`--image-min-tokens`/`--image-max-tokens`), not by this node pack.
+Descriptions are hand-written notes: nothing sends them to a provider, and
+they are not added to prompts or generation fingerprints by themselves.
 
 ## Storage and recovery
 

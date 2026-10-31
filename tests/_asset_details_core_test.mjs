@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 
 const {
-    assetDescribeBlocker,
-    assetDetailContext,
     assetDetailEntries,
     assetDetailLine,
     assetDetailTarget,
     assetDetailUsage,
     describedTags,
-    generatedDescriptionAction,
     insertAssetDetails,
     staleAssetDetails,
 } = await import("../web/h3_asset_details_core.mjs");
@@ -40,10 +37,6 @@ const records = [
 const entries = assetDetailEntries(records);
 assert.deepEqual(entries.map((item) => item.tag), ["hero", "cabinet", "hall", "look"]);
 assert.equal(entries[0].description, "is a tall woman in a red coat.");
-assert.deepEqual(assetDetailContext(entries).map((item) => item.tag), ["@hero", "@cabinet", "@hall"]);
-assert.deepEqual(assetDetailContext(entries)[0], {
-    tag: "@hero", tag_type: "char", description: "is a tall woman in a red coat.",
-});
 
 assert.equal(assetDetailLine(entries[0]), "@hero is a tall woman in a red coat.");
 assert.equal(assetDetailLine(entries[1]), "@cabinet: A tall wooden linen cabinet.");
@@ -169,19 +162,4 @@ const timedStale = staleAssetDetails(timedResult.text, assetDetailEntries([
 ]), {hallway: timedResult.lines.hallway});
 assert.equal(timedStale[0].newLine, "#hallway[2.50s] is a bright hallway.");
 
-// --- A late generated description never overwrites newer edits ---
-assert.equal(generatedDescriptionAction({requested: "old", saved: "old", live: "old"}), "apply");
-assert.equal(generatedDescriptionAction({requested: "old\r\n", saved: "old", live: null}), "apply");
-assert.equal(generatedDescriptionAction({requested: "", saved: "", live: null}), "apply");
-// Edited and saved while generating.
-assert.equal(generatedDescriptionAction({requested: "old", saved: "newer", live: "newer"}), "review");
-// Edited but not yet saved while generating.
-assert.equal(generatedDescriptionAction({requested: "old", saved: "old", live: "old, typing"}), "review");
-
-// --- Media access must be enabled explicitly; there is no bypass ---
-assert.equal(assetDescribeBlocker({allow_media: true}), "");
-for (const config of [{allow_media: false}, {}, {allow_media: "true"}, null]) {
-    assert.match(assetDescribeBlocker(config), /Allow Direct API to read reference media/);
-}
-
-console.log("H3 asset details: entries, placement, semantic syntax, stale refresh, late results, and media gate pass");
+console.log("H3 asset details: entries, placement, semantic syntax, and stale refresh pass");

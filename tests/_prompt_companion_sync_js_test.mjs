@@ -227,10 +227,9 @@ for (const relative of [
     for (const shots of [[{id:"one"}, {id:"new"}], [{id:"one"}, {id:"copy"}, {id:"two"}]]) {
         const state = {planNode:plan, plan:{shots:[{id:"one"}]}};
         let selected;
-        const apply = new Function("state", "loadPlan", "navigate", "optimizerBusy", `return ${handler}`)(
+        const apply = new Function("state", "loadPlan", "navigate", `return ${handler}`)(
             state, () => { state.plan = {shots}; },
-            (_offset, index) => { selected = state.plan.shots[Math.min(index, state.plan.shots.length - 1)].id; },
-            () => false);
+            (_offset, index) => { selected = state.plan.shots[Math.min(index, state.plan.shots.length - 1)].id; });
         assert.equal(apply(plan, 1), true);
         assert.equal(selected, shots[1].id, "new/duplicated scene is selected before polling");
         assert.equal(apply({}, 1), false, "unrelated Plans cannot change selection");

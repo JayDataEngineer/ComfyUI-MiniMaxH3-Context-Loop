@@ -4,12 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
     PromptUndoHistory,
-    RICH_PROMPT_GUIDES,
-    normalizeRichGuide,
-    optimizerSource,
     promptUndoDirection,
     richGenerationMode,
-    richGuideInstruction,
     tokenizeRichPrompt,
 } from "../web/h3_rich_prompt_editor_core.mjs";
 
@@ -91,21 +87,6 @@ assert.deepEqual(schemaTokens.map((item) => [item.type, item.text]), [
 assert.equal(richGenerationMode("scheduled"), "Ref2VA");
 assert.equal(richGenerationMode("tagged"), "Ref2VA");
 assert.equal(richGenerationMode("native_keyframes"), "I2VA/FL2VA");
-assert.equal(normalizeRichGuide("bogus"), "auto");
-assert.ok(RICH_PROMPT_GUIDES.some((item) => item.id === "music_video"));
-const guidedRefRewrite = richGuideInstruction("music_video", "Ref2VA");
-assert.match(guidedRefRewrite, /subject_definitions/);
-assert.match(guidedRefRewrite, /lyrics/);
-assert.match(guidedRefRewrite, /only when the user explicitly asks for a full H3 rewrite/);
-assert.match(guidedRefRewrite, /change only what the request requires/);
-assert.match(guidedRefRewrite, /Connected references prove only/);
-assert.match(guidedRefRewrite, /Do not invent image content, motion, lyrics, voice, timbre/);
-assert.match(guidedRefRewrite, /inside the supplied scene duration/);
-const compactRewrite = richGuideInstruction("general", "I2VA/FL2VA");
-assert.match(compactRewrite, /keyframe-alignment sentence only when/);
-assert.match(compactRewrite, /do not force headings onto a compact prompt/);
-assert.equal(optimizerSource("AI result", {source:"Original", result:"AI result"}), "Original");
-assert.equal(optimizerSource("Manual edit", {source:"Original", result:"AI result"}), "Manual edit");
 
 const source = fs.readFileSync(
     new URL("../web/h3_chain_rich_scene_prompt_editor.js", import.meta.url),
@@ -174,20 +155,10 @@ assert.match(source, /maxItems:40/);
 assert.match(source, /Type @, #, <, or \[/);
 assert.match(source, /Ctrl\/Cmd\+Space for all H3 completions/);
 assert.doesNotMatch(source, /event\.key === "@"/);
-assert.match(source, /RICH_PROMPT_GUIDES/);
-assert.match(source, /richGuideInstruction/);
-assert.match(source, /PromptAssistantClient/);
-assert.match(source, /prompt_assist_ready/);
-assert.match(source, /optimizerProviders/);
-assert.match(source, /promptOptimizerBackend/);
-assert.match(source, /makeDirectPromptOptimizeRequest/);
-assert.match(source, /openPromptOptimizerSettings/);
 assert.doesNotMatch(source, /h3rp-provider/);
 assert.match(source, /rebaseActivePromptOntoLivePlan/);
 assert.match(source, /publishCompanionScene/);
 assert.doesNotMatch(source, /state\.provider === "hermes"/);
-assert.match(source, /Optimize/);
-assert.match(source, /Apply changed result/);
 assert.match(source, /scheduleHistoryDraft/);
 assert.match(source, /flushHistoryDraft/);
 assert.match(source, /node\._h3FlushProjectWrites/);
@@ -226,51 +197,22 @@ assert.doesNotMatch(teardown, /flushPlanEffects\(\)/);
 assert.doesNotMatch(teardown, /flushPromptAnalysis\(\)/);
 assert.doesNotMatch(teardown, /flushHistoryDraft\(\)/);
 
-// A tag can be introduced in the basic prompt before Optimize ever turns it
-// into H3 text. Reference scanning for the optimizer request must include
-// the shot's basic_prompt, or that tag is reported inactive and its media
-// is left out of the Direct API resources list even though it belongs.
-const optimizePromptSource = source.slice(
-    source.indexOf("async function optimizePrompt()"),
-    source.indexOf("function stopOptimizer()"),
-);
-assert.match(optimizePromptSource,
-    /const refs = availableReferenceRecords\(node, sceneIndex \+ 1, \{[\s\S]{0,600}shot\.basic_prompt/,
-    "optimizer reference scanning must include the shot's basic_prompt, " +
-    "not just the shared/H3 prompt text, or a tag used only in the basic " +
-    "draft is excluded from the optimizer's active media list");
-
-// Applying an optimizer result (Direct API, MCP, or a previously pending
-// result) must refresh the reference tray/highlighting against the new
-// text before redrawing, or a newly active tag stays shown "inactive"
-// until an unrelated manual edit happens to trigger a refresh. This refresh
-// must NOT include basic_prompt: it reflects the compiled H3 prompt that
-// generation actually uses, so a draft-only tag omitted from the rewrite
-// must show inactive, and a tag's <Picture N> numbering must match the
-// resulting H3 text alone - unlike optimizePrompt()'s own reference scan
-// above, which deliberately does include basic_prompt for the separate
-// purpose of preparing the outgoing request.
+// Inserting asset details must refresh the reference tray/highlighting
+// against the new text before redrawing, so a newly active tag never stays
+// shown "inactive" until an unrelated manual edit happens to refresh it.
+// The refresh must NOT include basic_prompt: it reflects the compiled H3
+// prompt that generation actually uses.
 assert.match(source, /function refreshTaggedReferencesForShot\(text\)/,
     "a shared helper must refresh reference records for the resulting H3 " +
-    "text so all optimizer-apply sites stay consistent");
+    "text when asset details are inserted");
 assert.match(source,
     /prompt:\[sharedPrompt\(state\.plan\)\.text\.trim\(\), String\(text \?\? ""\)\.trim\(\)\]\s*\n\s*\.filter\(Boolean\)\.join\("\\n\\n"\),\s*\n\s*\},\s*\n\s*\);\s*\n\s*state\.records = refreshed\.records;/,
-    "the post-apply reference refresh must scan only the shared prompt " +
+    "the insert-time reference refresh must scan only the shared prompt " +
     "plus the resulting H3 text, not basic_prompt - otherwise a tag only " +
-    "in the basic draft (and omitted from the optimized result) keeps " +
-    "showing active/mismapped even though generation will not see it");
-for (const fnName of [
-    "handleOptimizerFrame", "applyPendingOptimizerResult", "applyOptimizerResponse",
-]) {
-    const start = source.indexOf(`function ${fnName}(`);
-    assert.notEqual(start, -1, `${fnName} must exist`);
-    const end = source.indexOf("\n    }\n\n", start);
-    const body = source.slice(start, end === -1 ? undefined : end);
-    assert.match(body,
-        /refreshTaggedReferencesForShot\([\s\S]{0,80}renderEditorText/,
-        `${fnName} must refresh tagged references before redrawing the ` +
-        "applied optimizer result, covering Direct API, MCP, and " +
-        "pending-result application alike");
-}
+    "in the basic draft keeps showing active/mismapped even though " +
+    "generation will not see it");
+assert.doesNotMatch(source, /optimiz/i,
+    "the prompt optimizer was deleted from the pack; no lane, control, " +
+    "or transport may return");
 
-console.log("H3 Rich Scene Prompt Editor: tokens, guides, previews, optimizer, and history pass");
+console.log("H3 Rich Scene Prompt Editor: tokens, previews, asset details, and history pass");

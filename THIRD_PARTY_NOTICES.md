@@ -286,8 +286,7 @@ SOFTWARE.
 ## ComfyUI-MiniMaxH3-Easy
 
 The H3 Chain Plan editors' quick `@` reference-tag and `#` dialogue-tag
-interactions, rich reference chips, media miniatures, compact optimizer
-presentation, and direct-provider transport pattern were inspired by
+interactions, rich reference chips, and media miniatures were inspired by
 [ComfyUI-MiniMaxH3-Easy](https://github.com/nkxx188/ComfyUI-MiniMaxH3-Easy)
 by **nkxx188**. The graph-aware scheduled-reference mapping, scene-card editor,
 plan serializer, prompt revision storage, MCP agent bridge integration,

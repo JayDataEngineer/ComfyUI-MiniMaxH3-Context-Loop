@@ -39,7 +39,7 @@ for (const filename of [
     const context = vm.createContext({
         state, node:{}, console,
         chapterView:() => ({focused:""}),
-        planRunName:() => run, runName:() => run, optimizerBusy:() => false,
+        planRunName:() => run, runName:() => run,
         flushPlanEffects(){}, flushPromptAnalysis(){},
         flushHistoryDraft:() => new Promise(resolve => pending.push(resolve)),
         persistView(){}, render(){}, renderPanel(){},

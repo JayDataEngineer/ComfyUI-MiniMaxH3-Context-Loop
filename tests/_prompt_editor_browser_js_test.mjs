@@ -292,7 +292,7 @@ function browserChecks(fixtures, basicOnly = false) {
             f.settings({markerReplacement:true, automaticSuggestions:true});
             f.editor.contentEditable = "false";
             f.editor.querySelector("[data-h3-prompt-marker]").click();
-            test(!f.state.completion.visible && !f.state.completion.refresh({manual:true}), "Optimizer-disabled editor cannot be edited through new menus");
+            test(!f.state.completion.visible && !f.state.completion.refresh({manual:true}), "Locked editor cannot be edited through new menus");
             f.editor.contentEditable = "true";
             f.settings({appendCompletionSpace:true});
             f.render("<Sub"); f.state.completion.refresh(); choose("<Subject 5>");

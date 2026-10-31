@@ -21,10 +21,6 @@ function oneLine(value) {
     return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function normalizedText(value) {
-    return String(value ?? "").replace(/\r\n?/g, "\n");
-}
-
 /** Reference records that carry a Carousel description, one per tag. */
 export function assetDetailEntries(records) {
     const entries = [];
@@ -49,15 +45,6 @@ export function assetDetailEntries(records) {
         });
     }
     return entries;
-}
-
-/** Compact descriptions for the prompt optimizer's request context. */
-export function assetDetailContext(entries) {
-    return (entries ?? []).filter((entry) => entry.active).map((entry) => ({
-        tag: entry.token,
-        ...(entry.tagType ? {tag_type: entry.tagType} : {}),
-        description: entry.description,
-    }));
 }
 
 /**
@@ -185,26 +172,4 @@ export function staleAssetDetails(text, entries, insertedLines) {
         if (newLine !== oldLine) result.push({tag: entry.tag, oldLine, newLine});
     }
     return result;
-}
-
-/**
- * Whether a finished generation may be saved directly. ``requested`` is the
- * description when Generate was pressed; ``saved`` is the catalog's current
- * value and ``live`` the editor field (null when not shown). Any difference
- * means the user changed it meanwhile, so the result needs explicit review.
- */
-export function generatedDescriptionAction({requested, saved, live = null}) {
-    const base = normalizedText(requested).trim();
-    if (normalizedText(saved).trim() !== base) return "review";
-    if (live !== null && normalizedText(live).trim() !== base) return "review";
-    return "apply";
-}
-
-/** Why Generate description may not run, or "" when media may be sent. */
-export function assetDescribeBlocker(config) {
-    return config?.allow_media === true ? "" : (
-        "Generate description sends this asset's media to the Direct API "
-        + "provider, and \"Allow Direct API to read reference media\" is off. "
-        + "Enable it in Settings → MiniMax H3 Context Loop → Prompt optimizer "
-        + "first; nothing was sent.");
 }

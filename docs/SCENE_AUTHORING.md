@@ -129,11 +129,11 @@ Hovering a loader-backed reference previews its image, video, or audio; computed
 tensors remain usable even when no browser-playable source file can be found.
 
 The schema inspector and completion catalog are shared by the focused Scene
-Prompt Editor and the optimizer-enabled Rich Scene Prompt Editor. They are
+Prompt Editor and the Rich Scene Prompt Editor. They are
 backported from the standalone
 [H3 Prompt IDE](https://github.com/ethanfel/ComfyUI-H3-Prompt-IDE), while these
 nodes retain Motion Context Plan synchronization, revisions, `@tags`,
-semantic anchors, and optimizer integration.
+and semantic anchors.
 
 ### Editor interactions
 
@@ -168,9 +168,6 @@ introduced by this port.
 The Rich Scene Prompt Editor uses the descriptions kept in the Project Asset
 Carousel (see [Describe an asset](PROJECT_ASSETS.md#describe-an-asset)):
 
-- **Optimize** sends the descriptions of the scene's tagged assets to the
-  optimizer as `asset_details`, so a rewrite can define subjects, settings, and
-  style from them.
 - **Asset details** inserts one editable line for each described `@tag` the
   scene prompt uses and does not already define, such as
   `@cabinet is a tall, narrow wooden linen cabinet.` Characters, objects, and
