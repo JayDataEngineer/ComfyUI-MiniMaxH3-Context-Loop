@@ -20,7 +20,7 @@ import os
 import sys
 import types
 
-_PKG = __file__.rsplit("/", 2)[0]
+_PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _PKG)
 
 MC_KEY = "motion_context_index"
