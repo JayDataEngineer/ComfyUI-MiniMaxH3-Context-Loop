@@ -263,7 +263,8 @@ class MiniMaxH3SelfLiftSeedHunt:
                      cfg=1.0, negative=None, candidate_count=4, batch_name="hunt_1",
                      tiny_vae="taeh3.safetensors", prompt=None, extra_pnginfo=None,
                      unique_id=None, dynprompt=None, auto_remove_saved_takes=False, review_enabled=True,
-                     model_hires=None, run_mode="resume", highres_tiling=None):
+                     model_hires=None, run_mode="resume", highres_tiling=None,
+                     timing_sync=False, debug_dump=False, memory_log=False):
         import folder_paths
         import torch
         import comfy.nested_tensor
@@ -407,7 +408,8 @@ class MiniMaxH3SelfLiftSeedHunt:
                 cleanup = bool(settings.get("cleanup_between_stages", False))
                 def lift(z, hw, temporal_split=None):
                     lift_options = {"cleanup_after": True} if cleanup else {}
-                    return learned_latent_lift(z, hw, name, temporal_split=temporal_split, **lift_options)
+                    return learned_latent_lift(z, hw, name, temporal_split=temporal_split,
+                                               memory_log=memory_log, **lift_options)
                 with torch.inference_mode():
                     staged = _stage_model(model, source["latent"], sigmas)
                     staged_hires = (_stage_model(model_hires, source["latent"], sigmas, continuity_model=model)
@@ -419,7 +421,8 @@ class MiniMaxH3SelfLiftSeedHunt:
                         "nearest", latent_lifter=lift, model_hires=staged_hires,
                         highres_tiling=(tiling if not options.get("stop_after_low")
                                         and not options.get("stop_after_lift") else None),
-                        cleanup_between_stages=cleanup, **options)
+                        cleanup_between_stages=cleanup, timing_sync=timing_sync,
+                        debug_dump=debug_dump, memory_log=memory_log, **options)
 
             async def preview_requested():
                 # Called only between low candidates or while waiting at the

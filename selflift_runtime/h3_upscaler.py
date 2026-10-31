@@ -361,14 +361,15 @@ def _inference_memory_required(model, z0_low, out_hw):
     return feature_elements * model.conv_in.weight.element_size() * 8
 
 
-def learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split=None, *, cleanup_after=False):
+def learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split=None, *, cleanup_after=False,
+                        memory_log=False):
     from ..selflift_upscalers import BILINEAR, TRIDAE
     if model_name in (BILINEAR, TRIDAE):
         from .alternative_lifts import latent_lift
         return latent_lift(z0_low, out_hw, model_name, device=device,
                            temporal_split=temporal_split, cleanup_after=cleanup_after)
     device = comfy.model_management.get_torch_device() if device is None else device
-    out = _learned_latent_lift(z0_low, out_hw, model_name, device, temporal_split)
+    out = _learned_latent_lift(z0_low, out_hw, model_name, device, temporal_split, memory_log=memory_log)
     if cleanup_after:
         # The inference frame (including temporary normalized GPU tensors) has
         # returned. Do not run this on an OOM, cancellation or failed lift.
@@ -379,7 +380,7 @@ def learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split=
     return out
 
 
-def _learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split=None):
+def _learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split=None, memory_log=False):
     """3D learned upsample of the low-res clean endpoint to the target latent size.
 
     z0_low: [B, 24, T, h, w] H3 video latent in VAE space. Returns [B, 24, T, H, W].
@@ -390,7 +391,7 @@ def _learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split
     h, w = z0_low.shape[-2], z0_low.shape[-1]
     scale = (H / h + W / w) / 2.0
 
-    log_memory("upscaler before_load", device)
+    log_memory("upscaler before_load", device, enabled=memory_log)
     patcher = _load_model(model_name, device)
     model = patcher.model
     memory_required = _inference_memory_required(model, z0_low, (H, W))
@@ -410,7 +411,7 @@ def _learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split
                  chunk, overlap if chunked else 0, len(windows) if chunked else int(not identity),
                  actual_window if not identity else 0, budget_window, memory_required / 2**20)
     comfy.model_management.load_models_gpu([patcher], memory_required=memory_required)
-    log_memory("upscaler after_load", device)
+    log_memory("upscaler after_load", device, enabled=memory_log)
     dtype = model.conv_in.weight.dtype
     mean = torch.tensor(LATENTS_MEAN, dtype=dtype, device=device).view(1, -1, 1, 1, 1)
     std = torch.tensor(LATENTS_STD, dtype=dtype, device=device).view(1, -1, 1, 1, 1)
@@ -466,5 +467,5 @@ def _learned_latent_lift(z0_low, out_hw, model_name, device=None, temporal_split
         else:
             out = model(x, scale=scale, target_size=(z0_low.shape[2], H, W))
         out = (out * std + mean).float().to(comfy.model_management.intermediate_device())
-    log_memory("upscaler end", device)
+    log_memory("upscaler end", device, enabled=memory_log)
     return out

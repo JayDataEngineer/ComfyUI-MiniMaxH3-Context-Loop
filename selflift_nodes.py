@@ -140,7 +140,15 @@ class MiniMaxH3ChainSelfLiftSampler:
         }), "highres_tiling": (TILING_TYPE, {
             "tooltip": "Optional SelfLift Tiling settings for the final high-resolution denoising steps only. "
                        "Off/unconnected preserves full-frame sampling. Not TST or latent-upscaler tiling.",
-        })}}
+        }), "timing_sync": ("BOOLEAN", {"default": False, "label_on": "Timing sync on", "label_off": "Timing sync off", "tooltip":
+            "Debug: synchronize CUDA before each stage-timer read so two-stage timing logs measure device "
+            "time instead of wall time. Costs speed; diagnostics only."}),
+        "debug_dump": ("BOOLEAN", {"default": False, "label_on": "Debug decode on", "label_off": "Debug decode off", "tooltip":
+            "Debug: decode transition intermediates to PNGs under selflift_runtime/debug. "
+            "Substantially increases time and memory."}),
+        "memory_log": ("BOOLEAN", {"default": False, "label_on": "Memory log on", "label_off": "Memory log off", "tooltip":
+            "Debug: log per-stage process/system/CUDA memory snapshots without resetting allocator statistics."}),
+    }}
 
     RETURN_TYPES = ("LATENT", "STRING")
     RETURN_NAMES = ("output", "status")
@@ -152,7 +160,7 @@ class MiniMaxH3ChainSelfLiftSampler:
                    "with an H3 learned or bilinear latent upscaler and optional high-stage spatial tiling; no TST.")
 
     def sample(self, state, model, positive, vae, latent, sampler, sigmas, seed, cfg=1.0, negative=None,
-               model_hires=None, highres_tiling=None):
+               model_hires=None, highres_tiling=None, timing_sync=False, debug_dump=False, memory_log=False):
         import comfy.sample
         import comfy.samplers
         import comfy.utils
@@ -206,13 +214,14 @@ class MiniMaxH3ChainSelfLiftSampler:
         cleanup = bool(settings.get("cleanup_between_stages", False))
         def lifter(z, hw, temporal_split=None):
             options = {"cleanup_after": True} if cleanup else {}
-            return learned_latent_lift(z, hw, name, temporal_split=temporal_split, **options)
+            return learned_latent_lift(z, hw, name, temporal_split=temporal_split, memory_log=memory_log, **options)
         output = progressive_sample(
             staged_model, positive, negative, vae, prepared, sampler, sigmas,
             int(seed), float(cfg), total_steps - high_steps, controls["lowres_scale"],
             controls["rho"], controls["w_min"], controls["w_max"], "nearest",
             latent_lifter=lifter, model_hires=staged_hires, highres_tiling=tiling,
-            cleanup_between_stages=cleanup)
+            cleanup_between_stages=cleanup, timing_sync=timing_sync, debug_dump=debug_dump,
+            memory_log=memory_log)
         output[SIGNATURE] = settings_signature(settings)
         status = "SelfLift: %d low-resolution + %d full-resolution steps; native AV masks" % (
             total_steps - high_steps, high_steps)

@@ -35,12 +35,12 @@ _PREVIOUS_LOW_CARRY_KEY = "selflift_previous_low_resolution_carry"
 
 
 class _StageTimer:
-    def __init__(self, stage, device, resolution=None, pixel_scale=1):
+    def __init__(self, stage, device, resolution=None, pixel_scale=1, synchronize=False):
         self.stage = stage
         self.resolution = resolution
         self.pixel_scale = pixel_scale
         self.device = torch.device(device)
-        self.synchronize = os.environ.get("SELFLIFT_TIMING_SYNC", "0") == "1" and self.device.type == "cuda"
+        self.synchronize = bool(synchronize) and self.device.type == "cuda"
         self.started = self.previous = self._now()
         timing_mode = "CUDA-synchronized wall time" if self.synchronize else "wall time; no forced CUDA sync"
         suffix = ""
@@ -404,9 +404,9 @@ def _resize_keyframes(cond, h, w):
     return out
 
 
-def _debug_dump(vae, latents):
-    """Decode transition intermediates to PNGs when SELFLIFT_DEBUG=1."""
-    if os.environ.get("SELFLIFT_DEBUG", "0") != "1":
+def _debug_dump(vae, latents, enabled):
+    """Decode transition intermediates to PNGs when the node's debug_dump input is on."""
+    if not enabled:
         return
     out_dir = os.path.join(os.path.dirname(__file__), "debug")
     os.makedirs(out_dir, exist_ok=True)
@@ -425,7 +425,8 @@ def _debug_dump(vae, latents):
 def progressive_sample(model, positive, negative, vae, latent_image, sampler, sigmas, seed, cfg,
                        transition_step, lowres_scale, rho, w_min, w_max, latent_upsample, latent_lifter=None,
                        highres_tiling=False, model_hires=None, *, stop_after_low=False, handoff=None,
-                       cleanup_between_stages=False, stop_after_lift=False):
+                       cleanup_between_stages=False, stop_after_lift=False, timing_sync=False,
+                       debug_dump=False, memory_log=False):
     if stop_after_lift and (stop_after_low or handoff is None):
         raise ValueError("SelfLift lift preview requires a saved low-pass handoff and no stop_after_low.")
     _validate_schedule(sigmas, transition_step)
@@ -634,7 +635,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
     # update is discarded and rebuilt after the resolution transition, preserving NFE.
     resolution_scale = (getattr(model.get_model_object("latent_format"), "spacial_downscale_ratio", 1)
                         if video else getattr(model.get_model_object("latent_format"), "spacial_downscale_ratio", 1))
-    low_timer = _StageTimer("low_resolution", low_model.load_device, (h, w), resolution_scale)
+    low_timer = _StageTimer("low_resolution", low_model.load_device, (h, w), resolution_scale, synchronize=timing_sync)
     low_drift_state = low_model.model_options.get(_DRIFT_CONTROL_KEY)
     if callable(getattr(low_drift_state, "configure_selflift_stage", None)):
         low_drift_state.configure_selflift_stage(
@@ -644,7 +645,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
     sigma_next = sigmas[transition_step]
     latent_format = model.get_model_object("latent_format")
     if handoff is None:
-        log_memory("low_resolution start", low_model.load_device)
+        log_memory("low_resolution start", low_model.load_device, enabled=memory_log)
         low_sampler = radau.stage_sampler(sampler, boundary=transition) if radau_mode else sampler
         comfy.samplers.sample(low_model, noise_low, positive_low, negative_low, cfg, low_model.load_device,
                               low_sampler, sigmas[:transition_step + 1], low_model.model_options,
@@ -654,7 +655,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
         if not radau_mode and low_evaluations != transition_step:
             raise RuntimeError(f"SelfLift: expected {transition_step} low-resolution callbacks, received {low_evaluations}; check sampler wrappers")
         low_timer.finish()
-        log_memory("low_resolution end", model.load_device)
+        log_memory("low_resolution end", model.load_device, enabled=memory_log)
         if radau_mode:
             shapes = [tuple(s.shape) for s in _streams(low_latent)[0]]
             low_streams = radau.streams(transition.pop("state"), shapes, nested)
@@ -698,9 +699,9 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
     if cleanup_between_stages:
         from .memory import release_stage_models
         release_stage_models([low_model], keep_models=[high_model], stage="low-to-lift")
-    transition_timer = _StageTimer("transition", model.load_device, (H, W), resolution_scale)
+    transition_timer = _StageTimer("transition", model.load_device, (H, W), resolution_scale, synchronize=timing_sync)
     transition_timer.mark("prepare_endpoint")
-    log_memory("transition endpoint_ready", model.load_device)
+    log_memory("transition endpoint_ready", model.load_device, enabled=memory_log)
 
     # Artifact-Aware Consistency Lift (Eqs. 4-9); skip branches the weights discard
     need_pix = rho > 0.0 and w_max > 0.0
@@ -713,7 +714,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
         z0_low_vae, vae, (H, W), latent_upsample, latent_lifter,
         need_lat=need_lat, need_pix=need_pix, temporal_split=temporal_split)
     transition_timer.mark("paired_lifts")
-    log_memory("transition lifts_ready", model.load_device)
+    log_memory("transition lifts_ready", model.load_device, enabled=memory_log)
     z_lat = latent_format.process_in(z_lat_vae) if z_lat_vae is not None else None
     z_pix = latent_format.process_in(z_pix_vae) if z_pix_vae is not None else None
     # Timeline continuation has already been resolved jointly at low
@@ -729,13 +730,13 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
         blended = z0_high * m_cast + clean_video_anchor * (1.0 - m_cast)
         z0_high = torch.where(m_cast == 0, clean_video_anchor, blended)
         del clean_video_anchor, blended
-    if os.environ.get("SELFLIFT_DEBUG", "0") == "1":
+    if debug_dump:
         _debug_dump(vae, {
             "z0_low": z0_low_vae,
             "z_lat": z_lat_vae,
             "z_pix": z_pix_vae,
             "z0_high": latent_format.process_out(z0_high),
-        })
+        }, enabled=True)
     low_resolution_carry = (
         z0_low_vae.detach().to(
             device=comfy.model_management.intermediate_device(),
@@ -769,7 +770,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
         del seam_dc
     del z0_low_vae, z_lat_vae, z_pix_vae, z_lat, z_pix
     transition_timer.mark("correction_and_debug")
-    log_memory("transition correction_ready", model.load_device)
+    log_memory("transition correction_ready", model.load_device, enabled=memory_log)
 
     if stop_after_lift:
         # Exactly the clean endpoint used below (including mask/rho/seam
@@ -839,7 +840,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
     del next_streams
     transition_timer.mark("renoise")
     transition_timer.finish()
-    log_memory("transition end / high_resolution start", high_model.load_device)
+    log_memory("transition end / high_resolution start", high_model.load_device, enabled=memory_log)
 
     high_evaluations = 0
     high_callback = (latent_preview.prepare_callback(high_model, total_steps)
@@ -855,7 +856,7 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
         high_timer.mark(f"step {step + 1}/{total_steps - transition_step}" + (" (includes setup)" if step == 0 else ""))
         return result
 
-    high_timer = _StageTimer("high_resolution", high_model.load_device, (H, W), resolution_scale)
+    high_timer = _StageTimer("high_resolution", high_model.load_device, (H, W), resolution_scale, synchronize=timing_sync)
     high_drift_state = high_model.model_options.get(_DRIFT_CONTROL_KEY)
     if callable(getattr(high_drift_state, "configure_selflift_stage", None)):
         high_drift_state.configure_selflift_stage(
@@ -905,5 +906,5 @@ def progressive_sample(model, positive, negative, vae, latent_image, sampler, si
     if low_resolution_carry is not None:
         result[_LOW_CARRY_KEY] = low_resolution_carry
     high_timer.finish()
-    log_memory("high_resolution end", high_model.load_device)
+    log_memory("high_resolution end", high_model.load_device, enabled=memory_log)
     return result
