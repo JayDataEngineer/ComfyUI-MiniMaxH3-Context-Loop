@@ -76,8 +76,29 @@ def _atomic_json(path: str, value: Any) -> None:
 
 
 def _read_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    """Read one JSON file from the asset store, naming the file on every
+    failure (same class as chain_nodes._read_json: a bare json.load dies
+    pathless on a missing or 0-byte document)."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "H3 asset store file is missing: %s" % path) from exc
+    except OSError as exc:
+        raise OSError(
+            "H3 asset store file is unreadable: %s (%s)" % (path, exc)) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = -1
+        if size == 0:
+            raise ValueError(
+                "H3 asset store file is EMPTY (0 bytes): %s — the write "
+                "that produced it did not complete." % path) from exc
+        raise ValueError(
+            "H3 asset store file is not valid JSON: %s (%s)" % (path, exc)) from exc
 
 
 def _inside(root: str, path: str) -> bool:

@@ -9026,8 +9026,33 @@ def _atomic_json(path: str, value: Any) -> None:
 
 
 def _read_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    """Read one JSON file from the chain store, naming the file on every
+    failure. The bare form burned as a pathless
+    ``JSONDecodeError: Expecting value: line 1 column 1 (char 0)`` on a
+    0-byte scene manifest: the run died without naming the file to
+    repair. Every failure mode now carries the path (and an empty file
+    says so — a write that did not complete)."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "H3 chain store file is missing: %s" % path) from exc
+    except OSError as exc:
+        raise OSError(
+            "H3 chain store file is unreadable: %s (%s)" % (path, exc)) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = -1
+        if size == 0:
+            raise ValueError(
+                "H3 chain store file is EMPTY (0 bytes): %s — the write "
+                "that produced it did not complete; regenerate that scene "
+                "or select another revision." % path) from exc
+        raise ValueError(
+            "H3 chain store file is not valid JSON: %s (%s)" % (path, exc)) from exc
 
 
 def _run_editorial_path(run_name: Any) -> str:
