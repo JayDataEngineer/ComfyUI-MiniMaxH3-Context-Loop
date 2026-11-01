@@ -2989,11 +2989,23 @@ class MiniMaxH3ChainUpscaleLoopEnd:
                 linked_id = link[0]
                 if (linked_id in parent_ids and display_id == linked_id and
                         output_id not in upstream[parent_id]):
-                    if "." in parent_id:
-                        parts = parent_id.split(".")
+                    if "." in parent_id and "." not in output_id and "::" not in output_id:
+                        # Subgraph notation: a BARE output id inside a
+                        # dotted parent is addressed relative to the
+                        # parent's own prefix — swap the LAST segment
+                        # only (rsplit, never a full split: the prefix
+                        # itself may carry dots).
+                        parts = parent_id.rsplit(".", 1)
                         parts[-1] = output_id
                         upstream[parent_id].append(".".join(parts))
                     else:
+                        # Top-level output ids ride verbatim. The
+                        # merged plane (estate planMerge) namespaces
+                        # every stage node "sid::nid.idx": the old
+                        # unconditional split re-joined such ids into
+                        # "sid::a.0.sid::b.0" and the recurse died on
+                        # dynprompt.get_node with NodeNotFoundError
+                        # (the 2026-11-13 multi-scene advance burn).
                         upstream[parent_id].append(output_id)
 
     def _collect_contained(self, node_id, upstream, contained):
