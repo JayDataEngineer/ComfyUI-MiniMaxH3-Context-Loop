@@ -358,9 +358,65 @@ class MiniMaxH3ContexLoopMaskSlice:
         return selected.contiguous(), scene_frames, status
 
 
+class MiniMaxH3ContexLoopMaskLengthCheck:
+    """Refuse a per-frame edit mask that is not the clip's own length.
+
+    The own-video mask dial loads a mask timeline whose frame count
+    is the file's, not the edit's: a length mismatch would silently
+    misalign (a short timeline broadcasts or truncates per scene).
+    The check refuses loud, naming both frame counts.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_frames": ("IMAGE", {
+                    "tooltip": "The clip the edit rides, exactly as "
+                               "loaded (window caps included)."}),
+                "mask": ("MASK", {
+                    "tooltip": "The per-frame mask timeline staged as "
+                               "a video. White means generate."}),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "INT", "STRING")
+    RETURN_NAMES = ("mask", "mask_frames", "status")
+    OUTPUT_TOOLTIPS = (
+        "The verified mask timeline, passed through unchanged.",
+        "Number of mask frames the check verified.",
+        "The length-match verdict naming both frame counts.",
+    )
+    FUNCTION = "check"
+    CATEGORY = "conditioning/minimax/context_loop/masking"
+    DESCRIPTION = (
+        "Length-match gate for a per-frame edit mask staged as a "
+        "video: the mask timeline must carry exactly the loaded "
+        "clip's frame count, or the run refuses naming both counts.")
+
+    def check(self, source_frames, mask):
+        timeline = normalize_comfy_mask(mask)
+        source_count = int(source_frames.shape[0])
+        mask_count = int(timeline.shape[0])
+        if mask_count != source_count:
+            raise ValueError(
+                "h3_mask_length_check: LENGTH MISMATCH — the mask "
+                "video carries %d frames, the edit's clip carries %d. "
+                "A per-frame mask must length-match the clip it edits "
+                "(restage the mask at the clip's own frame count; the "
+                "track card's mask export already carries it)."
+                % (mask_count, source_count))
+        status = (
+            "H3 mask length match: mask %d frames == clip %d frames."
+            % (mask_count, source_count))
+        _LOG.info(status)
+        return timeline.contiguous(), mask_count, status
+
+
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3ContexLoopSourceAVTarget": MiniMaxH3ContexLoopSourceAVTarget,
     "MiniMaxH3ContexLoopMaskSlice": MiniMaxH3ContexLoopMaskSlice,
+    "MiniMaxH3ContexLoopMaskLengthCheck": MiniMaxH3ContexLoopMaskLengthCheck,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -368,4 +424,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
         "MiniMax H3 Masking · Loop Source AV Target"),
     "MiniMaxH3ContexLoopMaskSlice": (
         "MiniMax H3 Masking · Loop Mask Slice"),
+    "MiniMaxH3ContexLoopMaskLengthCheck": (
+        "MiniMax H3 Masking · Loop Mask Length Check"),
 }
