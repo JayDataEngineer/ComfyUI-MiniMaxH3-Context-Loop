@@ -43,11 +43,21 @@ def sample_boundary_from_frames(
 
 def conform_waveform_length(
         waveform, samples: int, label: str,
-        max_fractional_change: float = 0.005):
+        max_fractional_change: float = 0.005,
+        grid_step_samples: int = 0):
     """Time-conform a small decoder/grid mismatch to an exact sample span.
 
     A larger discrepancy is likely incorrect wiring or timing metadata and is
     rejected instead of being hidden by a large resample.
+
+    ``grid_step_samples`` widens the acceptance to ONE step of the audio
+    encoder's own latent grid (H3: 40 Hz → 0.025 s per step, ~800 samples
+    at 32 kHz). The step is the grid's resolution: ComfyUI rounds the
+    required audio steps to the nearest integer, so a window shorter than
+    1.67 s (40 frames) can land a full step — 0.91% on a 22-frame window —
+    off the frame-exact span with nothing wrong wired. The fractional cap
+    alone cannot scale to short windows because the error is absolute;
+    two steps or more is still wiring/metadata and refuses.
     """
     target = int(samples)
     current = int(waveform.shape[-1])
@@ -59,7 +69,10 @@ def conform_waveform_length(
             (label, current, target))
 
     fractional_change = abs(target - current) / float(target)
-    if fractional_change > float(max_fractional_change):
+    within_grid_step = (
+        grid_step_samples > 0 and
+        abs(target - current) <= int(grid_step_samples))
+    if fractional_change > float(max_fractional_change) and not within_grid_step:
         raise ValueError(
             "%s differs from its exact frame timeline by %.3f%% "
             "(%d -> %d samples), too large for H3 audio time-conformance." %

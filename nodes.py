@@ -1019,11 +1019,17 @@ class MiniMaxH3LoopTrim:
                     % (seconds, length / sr))
             if match_tail:
                 full_want = int(round(total / float(fps) * sr))
+                # ONE 40 Hz latent-grid step in samples: ComfyUI rounds the
+                # required audio steps to the nearest integer, so a short
+                # window (under 40 frames) can decode a full step off the
+                # frame-exact span with nothing wrong wired (2026-11-15,
+                # the 22-frame refine handoff burn: 0.910%, refused).
+                grid_step = int(round(sr * 0.025))
                 if length != full_want:
                     waveform = conform_waveform_length(
                         waveform, full_want,
                         "h3_motion_context: decoded %d-frame full audio" %
-                        total)
+                        total, grid_step_samples=grid_step)
                 full_waveform = waveform
                 frames_left = total - n
                 want = int(round(frames_left / float(fps) * sr))
@@ -1046,7 +1052,7 @@ class MiniMaxH3LoopTrim:
                     waveform = conform_waveform_length(
                         waveform, want,
                         "h3_motion_context: decoded %d-frame audio" %
-                        frames_left)
+                        frames_left, grid_step_samples=grid_step)
             else:
                 full_waveform = None
                 waveform = waveform[..., cut:]

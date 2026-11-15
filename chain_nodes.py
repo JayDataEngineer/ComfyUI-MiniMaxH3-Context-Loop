@@ -25384,10 +25384,14 @@ def _png_export_audio_record(
             "H3 PNG/WAV export clip %d has invalid raw/delivered frame "
             "counts %d/%d." % (index, raw_frames, delivered_frames))
     raw_samples = sample_boundary_from_frames(raw_frames, sample_rate, FPS)
+    # ONE 40 Hz latent-grid step (see av_timing.conform_waveform_length):
+    # short segments decode a full step off the frame-exact span.
+    export_grid_step = int(round(sample_rate * 0.025))
     if int(waveform.shape[-1]) != raw_samples:
         waveform = conform_waveform_length(
             waveform, raw_samples,
-            "H3 PNG/WAV export clip %d raw audio" % index)
+            "H3 PNG/WAV export clip %d raw audio" % index,
+            grid_step_samples=export_grid_step)
     narration = segment.get("audio_trim_mode") == "fresh_narration_keep_start"
     cut = (0 if narration else
            sample_boundary_from_frames(repeated_frames, sample_rate, FPS))
@@ -25397,7 +25401,8 @@ def _png_export_audio_record(
     if int(delivered.shape[-1]) != delivered_samples:
         delivered = conform_waveform_length(
             delivered, delivered_samples,
-            "H3 PNG/WAV export clip %d delivered audio" % index)
+            "H3 PNG/WAV export clip %d delivered audio" % index,
+            grid_step_samples=export_grid_step)
     return {
         "segment": segment,
         "delivered": delivered.detach().to(device="cpu").contiguous(),
